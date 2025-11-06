@@ -1,0 +1,13 @@
+{
+  "name": "speedtestdikaa",
+  "version": "1.0.0",
+  "description": "Production-ready web-based speed test MVP with download, upload, WebSocket, and HTTP latency measurements.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}

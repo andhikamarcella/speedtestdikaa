@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Internet Speed Test</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background-color: #0f172a;
+        color: #e2e8f0;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background: radial-gradient(circle at top, #1f2937, #0f172a 60%);
+      }
+
+      header {
+        padding: 2rem 1rem 1rem;
+        text-align: center;
+      }
+
+      main {
+        flex: 1;
+        padding: 0 1rem 2rem;
+        max-width: 960px;
+        margin: 0 auto;
+        width: 100%;
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: clamp(1.75rem, 3vw, 2.5rem);
+        letter-spacing: 0.02em;
+      }
+
+      p.subtitle {
+        margin: 0;
+        color: #94a3b8;
+      }
+
+      .card-grid {
+        display: grid;
+        gap: 1rem;
+      }
+
+      @media (min-width: 768px) {
+        .card-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      .card {
+        background: rgba(15, 23, 42, 0.8);
+        border: 1px solid rgba(148, 163, 184, 0.1);
+        border-radius: 12px;
+        padding: 1rem;
+        box-shadow: 0 10px 40px rgba(15, 23, 42, 0.3);
+      }
+
+      .card h2 {
+        margin-top: 0;
+        font-size: 1.2rem;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+        padding-bottom: 0.5rem;
+        margin-bottom: 1rem;
+      }
+
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 0.35rem;
+      }
+
+      select,
+      input[type='text'] {
+        width: 100%;
+        padding: 0.5rem;
+        border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.4);
+        background: rgba(15, 23, 42, 0.6);
+        color: inherit;
+      }
+
+      select:focus,
+      input:focus,
+      button:focus {
+        outline: 2px solid #38bdf8;
+        outline-offset: 2px;
+      }
+
+      button {
+        appearance: none;
+        border: none;
+        border-radius: 999px;
+        padding: 0.6rem 1.2rem;
+        font-size: 0.95rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+        background: linear-gradient(135deg, #38bdf8, #818cf8);
+        color: #0f172a;
+        box-shadow: 0 10px 25px rgba(56, 189, 248, 0.35);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.65;
+        box-shadow: none;
+      }
+
+      button:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 15px 35px rgba(56, 189, 248, 0.45);
+      }
+
+      .controls-group {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .targets-list {
+        height: 10rem;
+      }
+
+      .status-line {
+        font-size: 0.85rem;
+        color: #cbd5f5;
+        margin-top: 0.75rem;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 0.5rem;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+        padding: 0.5rem;
+        text-align: left;
+      }
+
+      th {
+        cursor: pointer;
+      }
+
+      th[aria-sort='ascending']::after {
+        content: ' \2191';
+      }
+
+      th[aria-sort='descending']::after {
+        content: ' \2193';
+      }
+
+      .result-value {
+        font-size: 1.25rem;
+        font-weight: 700;
+      }
+
+      .muted {
+        color: #94a3b8;
+        font-size: 0.85rem;
+      }
+
+      .flex-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+      }
+
+      footer {
+        padding: 1rem;
+        text-align: center;
+        font-size: 0.8rem;
+        color: #94a3b8;
+      }
+
+      .error {
+        color: #fca5a5;
+        font-size: 0.9rem;
+        margin-top: 0.5rem;
+      }
+
+      .success {
+        color: #86efac;
+      }
+
+      .spinner {
+        width: 1em;
+        height: 1em;
+        border: 2px solid rgba(148, 163, 184, 0.4);
+        border-top-color: #38bdf8;
+        border-radius: 50%;
+        display: inline-block;
+        animation: spin 0.8s linear infinite;
+        vertical-align: middle;
+      }
+
+      @keyframes spin {
+        from {
+          transform: rotate(0);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Internet Speed Test (Download / Upload / Ping)</h1>
+      <p class="subtitle">Measure download, upload, WebSocket latency, and HTTP latency to popular game services.</p>
+    </header>
+    <main>
+      <div class="card controls-card">
+        <h2>Controls</h2>
+        <div class="controls-group">
+          <div>
+            <label for="download-size">Download size</label>
+            <select id="download-size" aria-label="Select download test size">
+              <option value="5">5 MB</option>
+              <option value="25" selected>25 MB</option>
+              <option value="100">100 MB</option>
+            </select>
+          </div>
+          <div>
+            <label for="upload-size">Upload size</label>
+            <select id="upload-size" aria-label="Select upload test size">
+              <option value="2">2 MB</option>
+              <option value="10" selected>10 MB</option>
+              <option value="50">50 MB</option>
+            </select>
+          </div>
+          <div class="flex-row">
+            <button id="download-btn" aria-label="Start download speed test">Test Download</button>
+            <button id="upload-btn" aria-label="Start upload speed test">Test Upload</button>
+            <button id="ws-btn" aria-label="Start WebSocket latency test">Test WS Ping</button>
+            <button id="http-btn" aria-label="Start HTTP latency test">HTTP Ping Selected</button>
+            <button id="ws-reconnect" aria-label="Reconnect WebSocket">Reconnect WS</button>
+          </div>
+          <div>
+            <label for="targets">HTTP targets</label>
+            <select id="targets" class="targets-list" aria-label="Select HTTP targets" multiple></select>
+            <div class="flex-row">
+              <input id="custom-target" type="text" placeholder="https://example.com/" aria-label="Add custom HTTP target" />
+              <button id="add-target" aria-label="Add custom HTTP target">Add target</button>
+            </div>
+          </div>
+        </div>
+        <div class="status-line" role="status" aria-live="polite">
+          <span id="server-url"></span> · <span id="ws-status">WebSocket: Disconnected</span>
+        </div>
+      </div>
+
+      <div class="card-grid">
+        <div class="card" id="download-card">
+          <h2>Download</h2>
+          <div class="result-value" id="download-mbps">–</div>
+          <div class="muted" id="download-meta">Select a size and run the test.</div>
+          <div class="error" id="download-error" hidden></div>
+        </div>
+        <div class="card" id="upload-card">
+          <h2>Upload</h2>
+          <div class="result-value" id="upload-mbps">–</div>
+          <div class="muted" id="upload-meta">Select a size and run the test.</div>
+          <div class="error" id="upload-error" hidden></div>
+        </div>
+        <div class="card" id="ws-card">
+          <h2>WebSocket Ping (20 samples)</h2>
+          <div class="result-value" id="ws-summary">–</div>
+          <div class="muted" id="ws-meta">Latency samples will appear here.</div>
+          <ul id="ws-list" class="muted"></ul>
+          <div class="error" id="ws-error" hidden></div>
+        </div>
+        <div class="card" id="http-card">
+          <h2>HTTP Ping</h2>
+          <div class="muted">Server-side HEAD requests to selected targets.</div>
+          <div class="error" id="http-error" hidden></div>
+          <table aria-label="HTTP latency results">
+            <thead>
+              <tr>
+                <th scope="col" data-key="target" tabindex="0" aria-sort="none">Target</th>
+                <th scope="col" data-key="status" tabindex="0" aria-sort="none">Status</th>
+                <th scope="col" data-key="ms" tabindex="0" aria-sort="none">Latency (ms)</th>
+              </tr>
+            </thead>
+            <tbody id="http-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+    <footer>
+      <p>
+        Uses HTTP streams for throughput and WebSockets for latency. Real network latency may differ from ICMP (ping) tests. Add more game endpoints above and share the link with your team.
+      </p>
+      <button id="reset-btn" aria-label="Reset all results">Reset</button>
+    </footer>
+    <script type="module" src="./script.js"></script>
+  </body>
+</html>
