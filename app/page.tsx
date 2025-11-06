@@ -375,229 +375,334 @@ export default function HomePage() {
     return [
       downloadResult && {
         label: 'Download',
-        value: downloadResult.mbps,
         formatted: formatMbps(downloadResult.mbps)
       },
       uploadResult && {
         label: 'Upload',
-        value: uploadResult.mbps,
         formatted: formatMbps(uploadResult.mbps)
       },
       pingResult && {
         label: 'Ping (avg)',
-        value: pingResult.avg,
         formatted: formatRtt(pingResult.avg)
       }
-    ].filter(Boolean) as { label: string; value: number; formatted: string }[];
+    ].filter(Boolean) as { label: string; formatted: string }[];
   }, [downloadResult, pingResult, uploadResult]);
 
+  const heroStats = useMemo(
+    () => [
+      {
+        key: 'download',
+        label: 'Download',
+        value: downloadResult ? formatMbps(downloadResult.mbps) : '—',
+        caption: downloadResult
+          ? `${formatBytes(downloadResult.bytes)} • ${formatDuration(downloadResult.durationMs)}`
+          : 'Awaiting measurement',
+        tone: 'blue'
+      },
+      {
+        key: 'upload',
+        label: 'Upload',
+        value: uploadResult ? formatMbps(uploadResult.mbps) : '—',
+        caption: uploadResult
+          ? `${formatBytes(uploadResult.bytes)} • ${formatDuration(uploadResult.durationMs)}`
+          : 'Run the upload test to capture data',
+        tone: 'purple'
+      },
+      {
+        key: 'ping',
+        label: 'HTTP Ping',
+        value: pingResult ? formatRtt(pingResult.avg) : '—',
+        caption: pingResult
+          ? `Min ${formatRtt(pingResult.min)} • Max ${formatRtt(pingResult.max)}`
+          : `${DEFAULT_PING_ITERATIONS} sample average`,
+        tone: 'green'
+      }
+    ], [downloadResult, uploadResult, pingResult]
+  );
+
+  const statusTags = [
+    {
+      key: 'download',
+      label: 'Download',
+      status: downloadRunning ? 'Running' : 'Idle',
+      tone: downloadRunning ? 'active' : downloadResult ? 'ready' : 'muted'
+    },
+    {
+      key: 'upload',
+      label: 'Upload',
+      status: uploadRunning ? 'Running' : 'Idle',
+      tone: uploadRunning ? 'active' : uploadResult ? 'ready' : 'muted'
+    },
+    {
+      key: 'ping',
+      label: 'HTTP Ping',
+      status: pingRunning ? 'Running' : 'Idle',
+      tone: pingRunning ? 'active' : pingResult ? 'ready' : 'muted'
+    }
+  ];
+
+  const anyRunning = downloadRunning || uploadRunning || pingRunning;
+
   return (
-    <main>
-      <header>
-        <span className="badge">Vercel Ready</span>
-        <h1>Internet Speed Test</h1>
-        <p>
-          Measure download throughput, upload throughput, and HTTP latency without leaving your
-          browser. The tests run entirely on a Vercel-friendly Next.js application, using precise
-          streaming timers and cache-safe API routes.
-        </p>
-      </header>
+    <main className="page">
+      <div className="page__glow" aria-hidden="true" />
+      <div className="page__container">
+        <header className="hero" role="banner">
+          <div className="hero__content">
+            <span className="hero__badge">Vercel Ready</span>
+            <h1>Internet Speed Intelligence Dashboard</h1>
+            <p>
+              Stream-aligned diagnostics for download, upload, and HTTP latency — engineered for
+              Vercel&apos;s serverless platform. Every reading relies on <code>performance.now()</code>
+              and cache-safe API routes for accuracy.
+            </p>
 
-      <div className="card" aria-live="polite">
-        <h2>Test Controls</h2>
-        <p className="description">
-          Choose how long each throughput test should run. You can stop an in-flight test at any
-          time, or stop everything at once.
-        </p>
-        <div className="controls" role="group" aria-label="Test duration selector">
-          <label>
-            Duration
-            <select
-              aria-label="Select test duration"
-              value={duration}
-              onChange={(event) => setDuration(Number(event.target.value) as typeof duration)}
-            >
-              {DURATION_OPTIONS.map((option) => (
-                <option key={option} value={option}>{`${option} seconds`}</option>
+            <div className="hero__controls" role="group" aria-label="Global test controls">
+              <label className="field">
+                <span>Test duration</span>
+                <select
+                  className="select"
+                  aria-label="Select test duration"
+                  value={duration}
+                  onChange={(event) => setDuration(Number(event.target.value) as typeof duration)}
+                >
+                  {DURATION_OPTIONS.map((option) => (
+                    <option key={option} value={option}>{`${option} seconds`}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="btn btn--ghost"
+                type="button"
+                onClick={stopAll}
+                disabled={!anyRunning}
+              >
+                Stop All Tests
+              </button>
+            </div>
+
+            <div className="hero__statuses" role="list" aria-label="Test status indicators">
+              {statusTags.map((tag) => (
+                <span key={tag.key} className={`status status--${tag.tone}`} role="listitem">
+                  <span className="status__dot" aria-hidden="true" />
+                  {tag.label}: {tag.status}
+                </span>
               ))}
-            </select>
-          </label>
-          <button className="secondary" type="button" onClick={stopAll}>
-            Stop All Tests
-          </button>
-        </div>
-      </div>
-
-      <div className="card-grid" role="list">
-        <section className="card" role="listitem">
-          <h2>Download Speed</h2>
-          <p className="description">
-            Streams random bytes from the server for the selected duration. Measures average Mbps
-            using <code>performance.now()</code>.
-          </p>
-          <div className="controls">
-            <button
-              type="button"
-              className="primary"
-              onClick={runDownloadTest}
-              aria-label={downloadRunning ? 'Stop download test' : 'Start download test'}
-              disabled={uploadRunning}
-            >
-              {downloadRunning ? 'Stop Download' : 'Start Download'}
-            </button>
+            </div>
           </div>
-          {downloadProgress && (
-            <div>
-              <div className="progress-bar" aria-hidden="true">
-                <span style={{ width: `${downloadProgress.percent.toFixed(1)}%` }} />
-              </div>
-              <div className="result-meta">
-                <span>Progress: {downloadProgress.percent.toFixed(1)}%</span>
-                <span>Instantaneous: {formatMbps(downloadProgress.instantaneousMbps)}</span>
-              </div>
-            </div>
-          )}
-          {downloadResult && (
-            <div className="results-grid" aria-label="Download result summary">
-              <div>
-                <div className="result-value">{formatMbps(downloadResult.mbps)}</div>
-                <div className="result-meta">
-                  <span>{formatBytes(downloadResult.bytes)}</span>
-                  <span>{formatDuration(downloadResult.durationMs)}</span>
-                </div>
-              </div>
-            </div>
-          )}
-          {downloadError && <small className="error">{downloadError}</small>}
-        </section>
 
-        <section className="card" role="listitem">
-          <h2>Upload Speed</h2>
-          <p className="description">
-            Generates random data in the browser and streams it back to the serverless API endpoint
-            until the timer expires.
-          </p>
-          <div className="controls">
-            <button
-              type="button"
-              className="primary"
-              onClick={runUploadTest}
-              aria-label={uploadRunning ? 'Stop upload test' : 'Start upload test'}
-              disabled={downloadRunning}
-            >
-              {uploadRunning ? 'Stop Upload' : 'Start Upload'}
-            </button>
+          <div className="hero__stats" role="list" aria-label="Latest measurement highlights">
+            {heroStats.map((stat) => (
+              <div key={stat.key} className={`stat-card stat-card--${stat.tone}`} role="listitem">
+                <span className="stat-card__label">{stat.label}</span>
+                <span className="stat-card__value">{stat.value}</span>
+                <span className="stat-card__caption">{stat.caption}</span>
+              </div>
+            ))}
           </div>
-          {uploadProgress && (
-            <div>
-              <div className="progress-bar" aria-hidden="true">
-                <span style={{ width: `${uploadProgress.percent.toFixed(1)}%` }} />
-              </div>
-              <div className="result-meta">
-                <span>Progress: {uploadProgress.percent.toFixed(1)}%</span>
-                <span>Instantaneous: {formatMbps(uploadProgress.instantaneousMbps)}</span>
-              </div>
-            </div>
-          )}
-          {uploadResult && (
-            <div className="results-grid" aria-label="Upload result summary">
-              <div>
-                <div className="result-value">{formatMbps(uploadResult.mbps)}</div>
-                <div className="result-meta">
-                  <span>{formatBytes(uploadResult.bytes)}</span>
-                  <span>{formatDuration(uploadResult.durationMs)}</span>
-                </div>
-              </div>
-            </div>
-          )}
-          {uploadError && <small className="error">{uploadError}</small>}
-        </section>
+        </header>
 
-        <section className="card" role="listitem">
-          <h2>HTTP Ping</h2>
-          <p className="description">
-            Calls the lightweight <code>/api/ping</code> route {DEFAULT_PING_ITERATIONS} times and
-            records round-trip times using precise timers.
-          </p>
-          <div className="controls">
-            <button
-              type="button"
-              className="primary"
-              onClick={runPingTest}
-              aria-label={pingRunning ? 'Stop ping test' : 'Start ping test'}
+        <div className="dashboard">
+          <div className="dashboard__grid" role="list">
+            <section
+              className="panel panel--download"
+              role="listitem"
+              aria-labelledby="download-heading"
             >
-              {pingRunning ? 'Stop Ping' : 'Start Ping'}
-            </button>
-          </div>
-          {pingProgress && (
-            <div>
-              <div className="progress-bar" aria-hidden="true">
-                <span style={{ width: `${pingProgress.percent.toFixed(1)}%` }} />
-              </div>
-              <div className="result-meta">
-                <span>Progress: {pingProgress.percent.toFixed(1)}%</span>
-                {typeof pingProgress.lastRtt === 'number' && (
-                  <span>Last RTT: {formatRtt(pingProgress.lastRtt)}</span>
-                )}
-              </div>
-            </div>
-          )}
-          {pingResult && (
-            <div>
-              <div className="results-grid" aria-label="Ping result summary">
+              <div className="panel__header">
                 <div>
-                  <div className="result-value">{formatRtt(pingResult.avg)}</div>
-                  <div className="result-meta">
-                    <span>Min: {formatRtt(pingResult.min)}</span>
-                    <span>Max: {formatRtt(pingResult.max)}</span>
-                    <span>Std Dev: {formatRtt(pingResult.stdDev)}</span>
+                  <h2 id="download-heading">Download Speed</h2>
+                  <p className="panel__description">
+                    Streams random bytes from the server for the selected duration and reports the
+                    sustained throughput.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={runDownloadTest}
+                  aria-label={downloadRunning ? 'Stop download test' : 'Start download test'}
+                  disabled={uploadRunning}
+                >
+                  {downloadRunning ? 'Stop Download' : 'Start Download'}
+                </button>
+              </div>
+
+              {downloadProgress && (
+                <div className="progress" aria-live="polite">
+                  <div className="progress__bar" aria-hidden="true">
+                    <span style={{ width: `${downloadProgress.percent.toFixed(1)}%` }} />
+                  </div>
+                  <div className="progress__meta">
+                    <span>Progress: {downloadProgress.percent.toFixed(1)}%</span>
+                    <span>Instant: {formatMbps(downloadProgress.instantaneousMbps)}</span>
                   </div>
                 </div>
+              )}
+
+              {downloadResult && (
+                <div className="result" aria-label="Download result summary">
+                  <div className="result__value">{formatMbps(downloadResult.mbps)}</div>
+                  <div className="result__meta">
+                    <span>{formatBytes(downloadResult.bytes)}</span>
+                    <span>{formatDuration(downloadResult.durationMs)}</span>
+                  </div>
+                </div>
+              )}
+
+              {downloadError && <small className="error">{downloadError}</small>}
+            </section>
+
+            <section
+              className="panel panel--upload"
+              role="listitem"
+              aria-labelledby="upload-heading"
+            >
+              <div className="panel__header">
+                <div>
+                  <h2 id="upload-heading">Upload Speed</h2>
+                  <p className="panel__description">
+                    Generates random data in the browser and streams it to the API until time runs
+                    out, mirroring real throughput conditions.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={runUploadTest}
+                  aria-label={uploadRunning ? 'Stop upload test' : 'Start upload test'}
+                  disabled={downloadRunning}
+                >
+                  {uploadRunning ? 'Stop Upload' : 'Start Upload'}
+                </button>
               </div>
-              <div className="table-wrapper" role="region" aria-label="Ping samples">
-                <table>
-                  <thead>
-                    <tr>
-                      <th scope="col">Sample</th>
-                      <th scope="col">RTT</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pingResult.samples.map((sample, index) => (
-                      <tr key={`ping-${index}`}>
-                        <td>{index + 1}</td>
-                        <td>{formatRtt(sample)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+
+              {uploadProgress && (
+                <div className="progress" aria-live="polite">
+                  <div className="progress__bar" aria-hidden="true">
+                    <span style={{ width: `${uploadProgress.percent.toFixed(1)}%` }} />
+                  </div>
+                  <div className="progress__meta">
+                    <span>Progress: {uploadProgress.percent.toFixed(1)}%</span>
+                    <span>Instant: {formatMbps(uploadProgress.instantaneousMbps)}</span>
+                  </div>
+                </div>
+              )}
+
+              {uploadResult && (
+                <div className="result" aria-label="Upload result summary">
+                  <div className="result__value">{formatMbps(uploadResult.mbps)}</div>
+                  <div className="result__meta">
+                    <span>{formatBytes(uploadResult.bytes)}</span>
+                    <span>{formatDuration(uploadResult.durationMs)}</span>
+                  </div>
+                </div>
+              )}
+
+              {uploadError && <small className="error">{uploadError}</small>}
+            </section>
+
+            <section
+              className="panel panel--ping panel--wide"
+              role="listitem"
+              aria-labelledby="ping-heading"
+            >
+              <div className="panel__header">
+                <div>
+                  <h2 id="ping-heading">HTTP Ping</h2>
+                  <p className="panel__description">
+                    Calls the lightweight <code>/api/ping</code> endpoint {DEFAULT_PING_ITERATIONS}{' '}
+                    times and records round-trip timings.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={runPingTest}
+                  aria-label={pingRunning ? 'Stop ping test' : 'Start ping test'}
+                >
+                  {pingRunning ? 'Stop Ping' : 'Start Ping'}
+                </button>
               </div>
-            </div>
+
+              {pingProgress && (
+                <div className="progress" aria-live="polite">
+                  <div className="progress__bar" aria-hidden="true">
+                    <span style={{ width: `${pingProgress.percent.toFixed(1)}%` }} />
+                  </div>
+                  <div className="progress__meta">
+                    <span>Progress: {pingProgress.percent.toFixed(1)}%</span>
+                    {typeof pingProgress.lastRtt === 'number' && (
+                      <span>Last RTT: {formatRtt(pingProgress.lastRtt)}</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {pingResult && (
+                <div className="ping-results">
+                  <div className="result" aria-label="Ping result summary">
+                    <div className="result__value">{formatRtt(pingResult.avg)}</div>
+                    <div className="result__meta">
+                      <span>Min: {formatRtt(pingResult.min)}</span>
+                      <span>Max: {formatRtt(pingResult.max)}</span>
+                      <span>Std Dev: {formatRtt(pingResult.stdDev)}</span>
+                    </div>
+                  </div>
+                  <div className="table-wrapper" role="region" aria-label="Ping samples">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">Sample</th>
+                          <th scope="col">RTT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pingResult.samples.map((sample, index) => (
+                          <tr key={`ping-${index}`}>
+                            <td>{index + 1}</td>
+                            <td>{formatRtt(sample)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {pingError && <small className="error">{pingError}</small>}
+            </section>
+          </div>
+
+          {latestResultsSummary.length > 0 && (
+            <section className="panel panel--summary" aria-live="polite">
+              <div className="panel__header">
+                <div>
+                  <h2>Latest Measurements</h2>
+                  <p className="panel__description">
+                    Stored locally so you can compare with your next run.
+                  </p>
+                </div>
+              </div>
+              <ul className="summary-list">
+                {latestResultsSummary.map((entry) => (
+                  <li key={entry.label}>
+                    <span>{entry.label}</span>
+                    <strong>{entry.formatted}</strong>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
-          {pingError && <small className="error">{pingError}</small>}
-        </section>
+        </div>
+
+        <footer className="page__footer">
+          <p>
+            These metrics capture HTTP-based throughput and latency — expect variance versus ICMP
+            utilities. Deploy instantly on Vercel without maintaining a custom server.
+          </p>
+        </footer>
       </div>
-
-      {latestResultsSummary.length > 0 && (
-        <section className="card" aria-live="polite">
-          <h2>Latest Measurements</h2>
-          <p className="description">Your most recent results are stored locally for convenience.</p>
-          <ul className="inline-list">
-            {latestResultsSummary.map((entry) => (
-              <li key={entry.label}>
-                <strong>{entry.label}:</strong> {entry.formatted}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <footer>
-        <p>
-          Tests rely on HTTP streaming rather than ICMP, so expect different numbers compared to
-          router-level diagnostics. Deploy instantly on Vercel — no custom server required.
-        </p>
-      </footer>
     </main>
   );
 }
