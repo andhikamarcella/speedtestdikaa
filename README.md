@@ -1,46 +1,59 @@
-# Speed Test Web (MVP)
+# SpeedTest Vercel
 
-A production-ready Internet speed test built with Node.js, Express, and vanilla JavaScript. It measures download and upload throughput, WebSocket latency, and HTTP latency to popular game services such as Roblox, Steam, and Valorant.
+A Vercel-friendly internet speed test that measures download throughput, upload throughput, and HTTP latency using the Next.js App Router and TypeScript.
 
 ## Features
 
-- **Download test**: Streams random bytes from the server with chunked responses (64 KB chunks) and reports average throughput in Mbps.
-- **Upload test**: Generates random binary payloads in the browser and measures upload throughput to the server.
-- **WebSocket ping**: Collects 20 echo round-trip samples over a single persistent WebSocket connection and reports min/avg/max/σ statistics.
-- **HTTP latency**: Performs server-side `HEAD` requests (8 s timeout) to selectable endpoints (Roblox, Steam, Valorant, plus custom URLs) and presents sortable latency results.
-- **Responsive UI**: Simple, accessible single-page interface with live result cards and persistent custom target list.
+- ⚡️ Streaming download test that runs for a configurable duration
+- 🚀 Streaming upload test that generates random data in the browser
+- 📡 Lightweight HTTP ping that records min/avg/max/standard deviation
+- 💾 Results stored locally in the browser for quick reference
+- 🌓 Responsive, dark-mode-friendly UI built with plain CSS
+- ☁️ Ready to deploy on Vercel without any custom server code
 
 ## Getting Started
 
-```bash
-npm install
-npm start
-```
+1. Install dependencies:
 
-Then open [http://localhost:3000](http://localhost:3000) in your browser.
+   ```bash
+   npm install
+   ```
 
-## Project Structure
+2. Start the development server:
 
-```
-/
-├─ package.json
-├─ server.mjs
-└─ public/
-   ├─ index.html
-   └─ script.js
-```
+   ```bash
+   npm run dev
+   ```
 
-- `server.mjs` – Express server that serves static assets, exposes REST APIs for download/upload/HTTP ping, and hosts a WebSocket echo endpoint.
-- `public/index.html` – Responsive UI with minimal inline styles and accessible controls.
-- `public/script.js` – Client-side logic for running tests, rendering results, and managing WebSocket state.
+3. Visit [http://localhost:3000](http://localhost:3000) to run the tests.
+
+## Available Scripts
+
+- `npm run dev` – Start Next.js in development mode
+- `npm run build` – Create an optimized production build
+- `npm run start` – Serve the production build locally on port 3000
+
+## API Routes
+
+| Route | Method | Description |
+| ----- | ------ | ----------- |
+| `/api/download` | GET | Streams random bytes for a configurable duration. Query params: `seconds` (default 10), `chunk` (default 65536). |
+| `/api/upload` | POST | Accepts a streamed request body and returns `{ bytes }` to report the total payload size. |
+| `/api/ping` | GET/HEAD | Returns a 204 with a fresh `Date` header for precise round-trip timing. |
+
+All routes set `Cache-Control: no-store` to ensure accurate measurements and support cross-origin usage when proxied through Vercel.
+
+## Deployment
+
+Deploying to Vercel requires no additional configuration:
+
+1. Push this repository to GitHub.
+2. In the Vercel dashboard choose **New Project** → **Import**.
+3. Select the repository and keep the default Next.js settings.
+4. Deploy – the included `vercel.json` already disables caching for API routes.
 
 ## Notes
 
-- Throughput measurements rely on HTTP streaming rather than ICMP. Actual ping times may differ from `ping`/`traceroute` due to protocol differences and CDN routing.
-- Upload payloads are generated in-memory. Running large uploads consumes client RAM; stick to the built-in presets (2–50 MB) for most browsers.
-- To add more game endpoints, use the "Add target" field in the UI. Custom targets persist locally via `localStorage`.
-- The server caps download streams at 1 GB per request to protect against abuse.
-
-## License
-
-This project is released under the [MIT License](LICENSE).
+- Measurements rely on HTTP and fetch streaming APIs, so results may differ from ICMP-based utilities.
+- Upload testing depends on browsers that support streaming request bodies (Chrome 105+, Edge 105+, etc.).
+- Adjust the duration selector to balance accuracy and total runtime.

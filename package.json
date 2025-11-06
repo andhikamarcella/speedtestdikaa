@@ -1,13 +1,14 @@
 {
-  "name": "speedtestdikaa",
-  "version": "1.0.0",
-  "description": "Production-ready web-based speed test MVP with download, upload, WebSocket, and HTTP latency measurements.",
-  "type": "module",
+  "name": "speedtest-vercel",
+  "private": true,
   "scripts": {
-    "start": "node server.mjs"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -p 3000"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "ws": "^8.17.0"
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   }
 }
