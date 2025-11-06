@@ -8,5 +8,6 @@
       },
       "dest": "/api/$1"
     }
-  ]
+  ],
+  "outputDirectory": ".next"
 }
