@@ -30,6 +30,7 @@ type StoredResults = {
   download?: TestResult;
   upload?: TestResult;
   ping?: PingResult;
+  robloxPing?: PingResult;
 };
 
 type PingProgress = {
@@ -41,6 +42,8 @@ const STORAGE_KEY = 'speedtest-vercel-results-v1';
 const DURATION_OPTIONS = [5, 10, 15] as const;
 const DEFAULT_PING_ITERATIONS = 15;
 const STREAM_CHUNK_SIZE = 65536;
+const MAX_UPLOAD_BYTES = 3.5 * 1024 * 1024;
+const ROBLOX_PING_ITERATIONS = 12;
 
 const formatMbps = (value: number) => `${value.toFixed(2)} Mbps`;
 const formatBytes = (value: number) => {
@@ -82,22 +85,27 @@ export default function HomePage() {
   const [downloadResult, setDownloadResult] = useState<TestResult | null>(null);
   const [uploadResult, setUploadResult] = useState<TestResult | null>(null);
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
+  const [robloxPingResult, setRobloxPingResult] = useState<PingResult | null>(null);
 
   const [downloadProgress, setDownloadProgress] = useState<ProgressState | null>(null);
   const [uploadProgress, setUploadProgress] = useState<ProgressState | null>(null);
   const [pingProgress, setPingProgress] = useState<PingProgress | null>(null);
+  const [robloxPingProgress, setRobloxPingProgress] = useState<PingProgress | null>(null);
 
   const [downloadRunning, setDownloadRunning] = useState(false);
   const [uploadRunning, setUploadRunning] = useState(false);
   const [pingRunning, setPingRunning] = useState(false);
+  const [robloxPingRunning, setRobloxPingRunning] = useState(false);
 
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pingError, setPingError] = useState<string | null>(null);
+  const [robloxPingError, setRobloxPingError] = useState<string | null>(null);
 
   const downloadAbortRef = useRef<AbortController | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const pingAbortRef = useRef<AbortController | null>(null);
+  const robloxPingAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -108,6 +116,7 @@ export default function HomePage() {
       if (parsed.download) setDownloadResult(parsed.download);
       if (parsed.upload) setUploadResult(parsed.upload);
       if (parsed.ping) setPingResult(parsed.ping);
+      if (parsed.robloxPing) setRobloxPingResult(parsed.robloxPing);
     } catch (error) {
       console.warn('Failed to parse stored results', error);
     }
@@ -119,19 +128,22 @@ export default function HomePage() {
     if (downloadResult) payload.download = downloadResult;
     if (uploadResult) payload.upload = uploadResult;
     if (pingResult) payload.ping = pingResult;
+    if (robloxPingResult) payload.robloxPing = robloxPingResult;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [downloadResult, uploadResult, pingResult]);
+  }, [downloadResult, uploadResult, pingResult, robloxPingResult]);
 
   const resetAbortControllers = () => {
     downloadAbortRef.current = null;
     uploadAbortRef.current = null;
     pingAbortRef.current = null;
+    robloxPingAbortRef.current = null;
   };
 
   const stopAll = useCallback(() => {
     downloadAbortRef.current?.abort();
     uploadAbortRef.current?.abort();
     pingAbortRef.current?.abort();
+    robloxPingAbortRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -234,32 +246,56 @@ export default function HomePage() {
       let lastChunkTime = startedAt;
       const endAt = startedAt + duration * 1000;
 
+      let streamClosed = false;
+
       const stream = new ReadableStream<Uint8Array>({
         pull(streamController) {
+          if (streamClosed) {
+            return;
+          }
+
           if (controller.signal.aborted) {
+            streamClosed = true;
             streamController.error(new DOMException('Upload aborted', 'AbortError'));
             return;
           }
+
           const now = performance.now();
-          if (now >= endAt) {
+          const elapsed = now - startedAt;
+          const remainingBytes = MAX_UPLOAD_BYTES - totalBytes;
+          const timeRatio = Math.min(elapsed / (duration * 1000), 1);
+          const byteRatio = Math.min(totalBytes / MAX_UPLOAD_BYTES, 1);
+
+          if (now >= endAt || remainingBytes <= 0) {
+            streamClosed = true;
+            const finalPercent = Math.min(100, Math.max(timeRatio, byteRatio) * 100);
+            setUploadProgress({ percent: finalPercent, instantaneousMbps: 0 });
             streamController.close();
             return;
           }
-          const chunk = new Uint8Array(STREAM_CHUNK_SIZE);
+
+          const chunk = new Uint8Array(Math.min(STREAM_CHUNK_SIZE, remainingBytes));
           crypto.getRandomValues(chunk);
           totalBytes += chunk.byteLength;
 
-          const elapsed = now - startedAt;
           const chunkElapsed = Math.max(now - lastChunkTime, 1);
           const instantaneousMbps = (chunk.byteLength * 8) / (chunkElapsed / 1000) / 1e6;
           lastChunkTime = now;
 
+          const progressPercent = Math.min(
+            100,
+            Math.max(timeRatio, Math.min(totalBytes / MAX_UPLOAD_BYTES, 1)) * 100
+          );
+
           setUploadProgress({
-            percent: Math.min(100, (elapsed / (duration * 1000)) * 100),
+            percent: progressPercent,
             instantaneousMbps
           });
 
           streamController.enqueue(chunk);
+        },
+        cancel() {
+          streamClosed = true;
         }
       });
 
@@ -275,6 +311,22 @@ export default function HomePage() {
       };
 
       const response = await fetch('/api/upload', requestInit);
+
+      if (response.status === 413) {
+        const finishedAt = performance.now();
+        const durationMs = finishedAt - startedAt;
+        const mbps = totalBytes > 0 && durationMs > 0 ? (totalBytes * 8) / (durationMs / 1000) / 1e6 : 0;
+
+        setUploadResult({
+          mbps,
+          bytes: totalBytes,
+          durationMs,
+          timestamp: Date.now()
+        });
+
+        setUploadProgress({ percent: 100, instantaneousMbps: 0 });
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(`Server responded with status ${response.status}`);
@@ -371,6 +423,71 @@ export default function HomePage() {
     }
   }, [pingRunning]);
 
+  const runRobloxPingTest = useCallback(async () => {
+    if (robloxPingRunning) {
+      robloxPingAbortRef.current?.abort();
+      return;
+    }
+
+    setRobloxPingError(null);
+    setRobloxPingProgress({ percent: 0, lastRtt: null });
+    setRobloxPingRunning(true);
+
+    const controller = new AbortController();
+    robloxPingAbortRef.current = controller;
+
+    try {
+      const samples: number[] = [];
+
+      for (let index = 0; index < ROBLOX_PING_ITERATIONS; index += 1) {
+        if (controller.signal.aborted) {
+          throw new DOMException('Ping aborted', 'AbortError');
+        }
+
+        const startedAt = performance.now();
+        const cacheBust = `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`;
+        const targetUrl = `https://www.roblox.com/favicon.ico?cacheBust=${cacheBust}`;
+
+        await fetch(targetUrl, {
+          method: 'GET',
+          mode: 'no-cors',
+          signal: controller.signal
+        });
+
+        const finishedAt = performance.now();
+        const rtt = finishedAt - startedAt;
+        samples.push(rtt);
+
+        setRobloxPingProgress({
+          percent: ((index + 1) / ROBLOX_PING_ITERATIONS) * 100,
+          lastRtt: rtt
+        });
+
+        await delay(200);
+      }
+
+      const stats = calculateStats(samples);
+      if (stats) {
+        setRobloxPingResult({
+          ...stats,
+          samples,
+          timestamp: Date.now()
+        });
+      }
+
+      setRobloxPingProgress({ percent: 100, lastRtt: samples.at(-1) ?? null });
+    } catch (error) {
+      if (isAbortError(error)) {
+        setRobloxPingError('Roblox ping test aborted.');
+      } else {
+        setRobloxPingError((error as Error).message ?? 'Roblox ping test failed.');
+      }
+    } finally {
+      robloxPingAbortRef.current = null;
+      setRobloxPingRunning(false);
+    }
+  }, [robloxPingRunning]);
+
   const latestResultsSummary = useMemo(() => {
     return [
       downloadResult && {
@@ -384,9 +501,13 @@ export default function HomePage() {
       pingResult && {
         label: 'Ping (avg)',
         formatted: formatRtt(pingResult.avg)
+      },
+      robloxPingResult && {
+        label: 'Roblox Ping (avg)',
+        formatted: formatRtt(robloxPingResult.avg)
       }
     ].filter(Boolean) as { label: string; formatted: string }[];
-  }, [downloadResult, pingResult, uploadResult]);
+  }, [downloadResult, pingResult, robloxPingResult, uploadResult]);
 
   const heroStats = useMemo(
     () => [
@@ -416,8 +537,17 @@ export default function HomePage() {
           ? `Min ${formatRtt(pingResult.min)} • Max ${formatRtt(pingResult.max)}`
           : `${DEFAULT_PING_ITERATIONS} sample average`,
         tone: 'green'
+      },
+      {
+        key: 'roblox-ping',
+        label: 'Roblox Ping',
+        value: robloxPingResult ? formatRtt(robloxPingResult.avg) : '—',
+        caption: robloxPingResult
+          ? `Min ${formatRtt(robloxPingResult.min)} • Max ${formatRtt(robloxPingResult.max)}`
+          : `${ROBLOX_PING_ITERATIONS} sample average`,
+        tone: 'amber'
       }
-    ], [downloadResult, uploadResult, pingResult]
+    ], [downloadResult, pingResult, robloxPingResult, uploadResult]
   );
 
   const statusTags = [
@@ -438,10 +568,16 @@ export default function HomePage() {
       label: 'HTTP Ping',
       status: pingRunning ? 'Running' : 'Idle',
       tone: pingRunning ? 'active' : pingResult ? 'ready' : 'muted'
+    },
+    {
+      key: 'roblox-ping',
+      label: 'Roblox Ping',
+      status: robloxPingRunning ? 'Running' : 'Idle',
+      tone: robloxPingRunning ? 'active' : robloxPingResult ? 'ready' : 'muted'
     }
   ];
 
-  const anyRunning = downloadRunning || uploadRunning || pingRunning;
+  const anyRunning = downloadRunning || uploadRunning || pingRunning || robloxPingRunning;
 
   return (
     <main className="page">
@@ -671,6 +807,77 @@ export default function HomePage() {
               )}
 
               {pingError && <small className="error">{pingError}</small>}
+            </section>
+
+            <section
+              className="panel panel--roblox panel--wide"
+              role="listitem"
+              aria-labelledby="roblox-ping-heading"
+            >
+              <div className="panel__header">
+                <div>
+                  <h2 id="roblox-ping-heading">Roblox Ping</h2>
+                  <p className="panel__description">
+                    Fetches Roblox&apos;s public favicon with cache-busting queries to approximate
+                    end-user latency to their edge network.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={runRobloxPingTest}
+                  aria-label={robloxPingRunning ? 'Stop Roblox ping test' : 'Start Roblox ping test'}
+                >
+                  {robloxPingRunning ? 'Stop Roblox Ping' : 'Start Roblox Ping'}
+                </button>
+              </div>
+
+              {robloxPingProgress && (
+                <div className="progress" aria-live="polite">
+                  <div className="progress__bar" aria-hidden="true">
+                    <span style={{ width: `${robloxPingProgress.percent.toFixed(1)}%` }} />
+                  </div>
+                  <div className="progress__meta">
+                    <span>Progress: {robloxPingProgress.percent.toFixed(1)}%</span>
+                    {typeof robloxPingProgress.lastRtt === 'number' && (
+                      <span>Last RTT: {formatRtt(robloxPingProgress.lastRtt)}</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {robloxPingResult && (
+                <div className="ping-results">
+                  <div className="result" aria-label="Roblox ping result summary">
+                    <div className="result__value">{formatRtt(robloxPingResult.avg)}</div>
+                    <div className="result__meta">
+                      <span>Min: {formatRtt(robloxPingResult.min)}</span>
+                      <span>Max: {formatRtt(robloxPingResult.max)}</span>
+                      <span>Std Dev: {formatRtt(robloxPingResult.stdDev)}</span>
+                    </div>
+                  </div>
+                  <div className="table-wrapper" role="region" aria-label="Roblox ping samples">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">Sample</th>
+                          <th scope="col">RTT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {robloxPingResult.samples.map((sample, index) => (
+                          <tr key={`roblox-ping-${index}`}>
+                            <td>{index + 1}</td>
+                            <td>{formatRtt(sample)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {robloxPingError && <small className="error">{robloxPingError}</small>}
             </section>
           </div>
 

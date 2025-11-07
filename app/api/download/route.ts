@@ -15,16 +15,42 @@ export async function GET(req: Request): Promise<Response> {
 
   const startTime = performance.now();
   const endAt = startTime + seconds * 1000;
+  let closed = false;
+  let timeout: ReturnType<typeof setTimeout> | null = null;
 
   const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      timeout = setTimeout(() => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      }, seconds * 1000);
+    },
     pull(controller) {
+      if (closed) {
+        return;
+      }
+
       if (performance.now() >= endAt) {
+        closed = true;
+        if (timeout) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
         controller.close();
         return;
       }
+
       const chunk = new Uint8Array(chunkSize);
       crypto.getRandomValues(chunk);
       controller.enqueue(chunk);
+    },
+    cancel() {
+      closed = true;
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
     }
   });
 

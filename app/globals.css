@@ -12,6 +12,7 @@
   --accent-blue: #38bdf8;
   --accent-purple: #a855f7;
   --accent-green: #4ade80;
+  --accent-amber: #f97316;
   --accent-ghost: rgba(148, 163, 184, 0.22);
   --danger: #f87171;
   font-family: 'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, BlinkMacSystemFont,
@@ -305,6 +306,10 @@ code {
   box-shadow: inset 0 0 0 1px rgba(74, 222, 128, 0.22);
 }
 
+.stat-card--amber {
+  box-shadow: inset 0 0 0 1px rgba(249, 115, 22, 0.22);
+}
+
 .dashboard {
   display: flex;
   flex-direction: column;
@@ -344,6 +349,10 @@ code {
 
 .panel--ping {
   box-shadow: 0 24px 44px rgba(74, 222, 128, 0.16);
+}
+
+.panel--roblox {
+  box-shadow: 0 24px 44px rgba(249, 115, 22, 0.16);
 }
 
 .panel--summary {
