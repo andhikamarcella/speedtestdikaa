@@ -1,6 +1,8 @@
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request): Promise<Response> {
+  const { searchParams } = new URL(req.url);
+  const server = searchParams.get('server') ?? 'auto';
   let total = 0;
 
   if (!req.body) {
@@ -8,7 +10,8 @@ export async function POST(req: Request): Promise<Response> {
       status: 200,
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'no-store'
+        'Cache-Control': 'no-store',
+        'X-Speedtest-Server': server
       }
     });
   }
@@ -27,7 +30,8 @@ export async function POST(req: Request): Promise<Response> {
     status: 200,
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store',
+      'X-Speedtest-Server': server
     }
   });
 }

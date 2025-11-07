@@ -12,6 +12,7 @@ export async function GET(req: Request): Promise<Response> {
   const { searchParams } = new URL(req.url);
   const seconds = parsePositiveNumber(searchParams.get('seconds'), 10);
   const chunkSize = Math.max(1024, parsePositiveNumber(searchParams.get('chunk'), 65536));
+  const server = searchParams.get('server') ?? 'auto';
 
   const startTime = performance.now();
   const endAt = startTime + seconds * 1000;
@@ -57,7 +58,8 @@ export async function GET(req: Request): Promise<Response> {
   return new Response(stream, {
     headers: {
       'Content-Type': 'application/octet-stream',
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store',
+      'X-Speedtest-Server': server
     }
   });
 }

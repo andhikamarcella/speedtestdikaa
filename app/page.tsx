@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 type TestResult = {
   mbps: number;
@@ -26,11 +26,23 @@ type PingResult = PingStats & {
   timestamp: number;
 };
 
-type StoredResults = {
+type ServerResults = {
   download?: TestResult;
   upload?: TestResult;
   ping?: PingResult;
   robloxPing?: PingResult;
+};
+
+type StoredState = {
+  version: 2;
+  activeServerId: string;
+  servers: Record<string, ServerResults>;
+};
+
+type ServerOption = {
+  id: string;
+  label: string;
+  origin?: string;
 };
 
 type PingProgress = {
@@ -39,6 +51,13 @@ type PingProgress = {
 };
 
 const STORAGE_KEY = 'speedtest-vercel-results-v1';
+const SERVER_OPTIONS: ServerOption[] = [
+  { id: 'jakarta', label: 'Jakarta' },
+  { id: 'singapore', label: 'Singapore' },
+  { id: 'tokyo', label: 'Tokyo' },
+  { id: 'virginia', label: 'Virginia' }
+];
+const DEFAULT_SERVER_ID = SERVER_OPTIONS[0].id;
 const DURATION_OPTIONS = [5, 10, 15] as const;
 const DEFAULT_PING_ITERATIONS = 15;
 const STREAM_CHUNK_SIZE = 65536;
@@ -81,6 +100,7 @@ const isAbortError = (error: unknown): boolean => {
 
 export default function HomePage() {
   const [duration, setDuration] = useState<(typeof DURATION_OPTIONS)[number]>(DURATION_OPTIONS[1]);
+  const [selectedServerId, setSelectedServerId] = useState<string>(DEFAULT_SERVER_ID);
 
   const [downloadResult, setDownloadResult] = useState<TestResult | null>(null);
   const [uploadResult, setUploadResult] = useState<TestResult | null>(null);
@@ -106,38 +126,135 @@ export default function HomePage() {
   const uploadAbortRef = useRef<AbortController | null>(null);
   const pingAbortRef = useRef<AbortController | null>(null);
   const robloxPingAbortRef = useRef<AbortController | null>(null);
+  const storedStateRef = useRef<StoredState>({
+    version: 2,
+    activeServerId: DEFAULT_SERVER_ID,
+    servers: {}
+  });
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (!stored) return;
-      const parsed: StoredResults = JSON.parse(stored);
-      if (parsed.download) setDownloadResult(parsed.download);
-      if (parsed.upload) setUploadResult(parsed.upload);
-      if (parsed.ping) setPingResult(parsed.ping);
-      if (parsed.robloxPing) setRobloxPingResult(parsed.robloxPing);
-    } catch (error) {
-      console.warn('Failed to parse stored results', error);
+  const selectedServer = useMemo(() => {
+    return (
+      SERVER_OPTIONS.find((option) => option.id === selectedServerId) ?? SERVER_OPTIONS[0]
+    );
+  }, [selectedServerId]);
+
+  const applyServerResults = useCallback((serverId: string) => {
+    const entry = storedStateRef.current.servers[serverId];
+
+    if (entry && typeof entry === 'object') {
+      setDownloadResult(entry.download ?? null);
+      setUploadResult(entry.upload ?? null);
+      setPingResult(entry.ping ?? null);
+      setRobloxPingResult(entry.robloxPing ?? null);
+      return;
     }
+
+    setDownloadResult(null);
+    setUploadResult(null);
+    setPingResult(null);
+    setRobloxPingResult(null);
   }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const payload: StoredResults = {};
-    if (downloadResult) payload.download = downloadResult;
-    if (uploadResult) payload.upload = uploadResult;
-    if (pingResult) payload.ping = pingResult;
-    if (robloxPingResult) payload.robloxPing = robloxPingResult;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [downloadResult, uploadResult, pingResult, robloxPingResult]);
 
-  const resetAbortControllers = () => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (!stored) return;
+
+      const parsed = JSON.parse(stored) as unknown;
+
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        'version' in parsed &&
+        (parsed as { version: unknown }).version === 2
+      ) {
+        const state = parsed as StoredState;
+        const normalizedServers =
+          state.servers && typeof state.servers === 'object'
+            ? Object.entries(state.servers).reduce<Record<string, ServerResults>>(
+                (accumulator, [key, value]) => {
+                  if (value && typeof value === 'object') {
+                    const typed = value as ServerResults;
+                    accumulator[key] = {
+                      download: typed.download,
+                      upload: typed.upload,
+                      ping: typed.ping,
+                      robloxPing: typed.robloxPing
+                    };
+                  } else {
+                    accumulator[key] = {};
+                  }
+                  return accumulator;
+                },
+                {}
+              )
+            : {};
+
+        storedStateRef.current = {
+          version: 2,
+          activeServerId:
+            typeof state.activeServerId === 'string' ? state.activeServerId : DEFAULT_SERVER_ID,
+          servers: normalizedServers
+        };
+
+        const requestedId = storedStateRef.current.activeServerId;
+        const validServerId = SERVER_OPTIONS.some((option) => option.id === requestedId)
+          ? requestedId
+          : DEFAULT_SERVER_ID;
+
+        storedStateRef.current.activeServerId = validServerId;
+        setSelectedServerId(validServerId);
+        applyServerResults(validServerId);
+        return;
+      }
+
+      if (parsed && typeof parsed === 'object') {
+        const legacy = parsed as ServerResults;
+        const legacyEntry: ServerResults = {
+          download: legacy.download,
+          upload: legacy.upload,
+          ping: legacy.ping,
+          robloxPing: legacy.robloxPing
+        };
+        storedStateRef.current = {
+          version: 2,
+          activeServerId: DEFAULT_SERVER_ID,
+          servers: {
+            [DEFAULT_SERVER_ID]: legacyEntry
+          }
+        };
+        setSelectedServerId(DEFAULT_SERVER_ID);
+        applyServerResults(DEFAULT_SERVER_ID);
+      }
+    } catch (error) {
+      console.warn('Failed to parse stored results', error);
+    }
+  }, [applyServerResults]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const entry: ServerResults = {
+      download: downloadResult ?? undefined,
+      upload: uploadResult ?? undefined,
+      ping: pingResult ?? undefined,
+      robloxPing: robloxPingResult ?? undefined
+    };
+
+    storedStateRef.current.activeServerId = selectedServerId;
+    storedStateRef.current.servers[selectedServerId] = entry;
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(storedStateRef.current));
+  }, [downloadResult, uploadResult, pingResult, robloxPingResult, selectedServerId]);
+
+  const resetAbortControllers = useCallback(() => {
     downloadAbortRef.current = null;
     uploadAbortRef.current = null;
     pingAbortRef.current = null;
     robloxPingAbortRef.current = null;
-  };
+  }, []);
 
   const stopAll = useCallback(() => {
     downloadAbortRef.current?.abort();
@@ -146,12 +263,69 @@ export default function HomePage() {
     robloxPingAbortRef.current?.abort();
   }, []);
 
+  const handleServerChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      const nextServerId = event.target.value as (typeof SERVER_OPTIONS)[number]['id'];
+      if (nextServerId === selectedServerId) {
+        return;
+      }
+
+      stopAll();
+      resetAbortControllers();
+
+      setDownloadProgress(null);
+      setUploadProgress(null);
+      setPingProgress(null);
+      setRobloxPingProgress(null);
+
+      setDownloadError(null);
+      setUploadError(null);
+      setPingError(null);
+      setRobloxPingError(null);
+
+      storedStateRef.current.activeServerId = nextServerId;
+      applyServerResults(nextServerId);
+      setSelectedServerId(nextServerId);
+    },
+    [
+      applyServerResults,
+      resetAbortControllers,
+      selectedServerId,
+      stopAll
+    ]
+  );
+
+  const buildServerUrl = useCallback(
+    (path: string, params: Record<string, string | number> = {}) => {
+      const search = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        search.set(key, String(value));
+      });
+      search.set('server', selectedServer.id);
+      const query = search.toString();
+
+      if (selectedServer.origin) {
+        const url = new URL(path, selectedServer.origin);
+        url.search = query;
+        return url.toString();
+      }
+
+      return `${path}?${query}`;
+    },
+    [selectedServer]
+  );
+
+  const serverList = useMemo(
+    () => SERVER_OPTIONS.map((option) => option.label).join(', '),
+    []
+  );
+
   useEffect(() => {
     return () => {
       stopAll();
       resetAbortControllers();
     };
-  }, [stopAll]);
+  }, [resetAbortControllers, stopAll]);
 
   const runDownloadTest = useCallback(async () => {
     if (downloadRunning) {
@@ -168,7 +342,12 @@ export default function HomePage() {
 
     try {
       const startedAt = performance.now();
-      const response = await fetch(`/api/download?seconds=${duration}&chunk=${STREAM_CHUNK_SIZE}`, {
+      const requestUrl = buildServerUrl('/api/download', {
+        seconds: duration,
+        chunk: STREAM_CHUNK_SIZE
+      });
+
+      const response = await fetch(requestUrl, {
         signal: controller.signal,
         cache: 'no-store'
       });
@@ -224,8 +403,9 @@ export default function HomePage() {
     } finally {
       downloadAbortRef.current = null;
       setDownloadRunning(false);
+      setDownloadProgress(null);
     }
-  }, [downloadRunning, duration]);
+  }, [buildServerUrl, downloadRunning, duration]);
 
   const runUploadTest = useCallback(async () => {
     if (uploadRunning) {
@@ -310,7 +490,8 @@ export default function HomePage() {
         duplex: 'half'
       };
 
-      const response = await fetch('/api/upload', requestInit);
+      const uploadUrl = buildServerUrl('/api/upload');
+      const response = await fetch(uploadUrl, requestInit);
 
       if (response.status === 413) {
         const finishedAt = performance.now();
@@ -355,8 +536,9 @@ export default function HomePage() {
     } finally {
       uploadAbortRef.current = null;
       setUploadRunning(false);
+      setUploadProgress(null);
     }
-  }, [duration, uploadRunning]);
+  }, [buildServerUrl, duration, uploadRunning]);
 
   const runPingTest = useCallback(async () => {
     if (pingRunning) {
@@ -380,7 +562,7 @@ export default function HomePage() {
         }
 
         const startedAt = performance.now();
-        const response = await fetch('/api/ping', {
+        const response = await fetch(buildServerUrl('/api/ping'), {
           method: 'GET',
           cache: 'no-store',
           signal: controller.signal
@@ -421,7 +603,7 @@ export default function HomePage() {
       pingAbortRef.current = null;
       setPingRunning(false);
     }
-  }, [pingRunning]);
+  }, [buildServerUrl, pingRunning]);
 
   const runRobloxPingTest = useCallback(async () => {
     if (robloxPingRunning) {
@@ -512,12 +694,19 @@ export default function HomePage() {
   const heroStats = useMemo(
     () => [
       {
+        key: 'server',
+        label: 'Active Server',
+        value: selectedServer.label,
+        caption: selectedServer.origin ? new URL(selectedServer.origin).host : 'Applies to all tests',
+        tone: 'purple'
+      },
+      {
         key: 'download',
         label: 'Download',
         value: downloadResult ? formatMbps(downloadResult.mbps) : '—',
         caption: downloadResult
-          ? `${formatBytes(downloadResult.bytes)} • ${formatDuration(downloadResult.durationMs)}`
-          : 'Awaiting measurement',
+          ? `${formatBytes(downloadResult.bytes)} • ${formatDuration(downloadResult.durationMs)} • ${selectedServer.label}`
+          : `Active server: ${selectedServer.label}`,
         tone: 'blue'
       },
       {
@@ -525,8 +714,8 @@ export default function HomePage() {
         label: 'Upload',
         value: uploadResult ? formatMbps(uploadResult.mbps) : '—',
         caption: uploadResult
-          ? `${formatBytes(uploadResult.bytes)} • ${formatDuration(uploadResult.durationMs)}`
-          : 'Run the upload test to capture data',
+          ? `${formatBytes(uploadResult.bytes)} • ${formatDuration(uploadResult.durationMs)} • ${selectedServer.label}`
+          : `Send data to ${selectedServer.label} to begin`,
         tone: 'purple'
       },
       {
@@ -547,10 +736,16 @@ export default function HomePage() {
           : `${ROBLOX_PING_ITERATIONS} sample average`,
         tone: 'amber'
       }
-    ], [downloadResult, pingResult, robloxPingResult, uploadResult]
+    ], [downloadResult, pingResult, robloxPingResult, selectedServer, uploadResult]
   );
 
   const statusTags = [
+    {
+      key: 'server',
+      label: 'Server',
+      status: selectedServer.label,
+      tone: 'ready'
+    },
     {
       key: 'download',
       label: 'Download',
@@ -590,10 +785,26 @@ export default function HomePage() {
             <p>
               Stream-aligned diagnostics for download, upload, and HTTP latency — engineered for
               Vercel&apos;s serverless platform. Every reading relies on <code>performance.now()</code>
-              and cache-safe API routes for accuracy.
+              and cache-safe API routes for accuracy. Choose between {serverList} to profile each
+              region instantly.
             </p>
 
             <div className="hero__controls" role="group" aria-label="Global test controls">
+              <label className="field">
+                <span>Test server</span>
+                <select
+                  className="select"
+                  aria-label="Select test server"
+                  value={selectedServerId}
+                  onChange={handleServerChange}
+                >
+                  {SERVER_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label className="field">
                 <span>Test duration</span>
                 <select
@@ -649,8 +860,8 @@ export default function HomePage() {
                 <div>
                   <h2 id="download-heading">Download Speed</h2>
                   <p className="panel__description">
-                    Streams random bytes from the server for the selected duration and reports the
-                    sustained throughput.
+                    Streams random bytes from the {selectedServer.label} server for the selected
+                    duration and reports the sustained throughput.
                   </p>
                 </div>
                 <button
@@ -698,8 +909,8 @@ export default function HomePage() {
                 <div>
                   <h2 id="upload-heading">Upload Speed</h2>
                   <p className="panel__description">
-                    Generates random data in the browser and streams it to the API until time runs
-                    out, mirroring real throughput conditions.
+                    Generates random data in the browser and streams it to the {selectedServer.label}
+                    API until time runs out, mirroring real throughput conditions.
                   </p>
                 </div>
                 <button
@@ -747,8 +958,10 @@ export default function HomePage() {
                 <div>
                   <h2 id="ping-heading">HTTP Ping</h2>
                   <p className="panel__description">
-                    Calls the lightweight <code>/api/ping</code> endpoint {DEFAULT_PING_ITERATIONS}{' '}
-                    times and records round-trip timings.
+                    Calls the lightweight <code>/api/ping</code> endpoint on the
+                    {' '}
+                    {selectedServer.label} region {DEFAULT_PING_ITERATIONS} times and records
+                    round-trip timings.
                   </p>
                 </div>
                 <button
