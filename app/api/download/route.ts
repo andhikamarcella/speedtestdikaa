@@ -1,57 +1,41 @@
+const DEFAULT_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_SIZE_BYTES = 100 * 1024 * 1024;
+const CHUNK_SIZE_BYTES = 64 * 1024;
+
+export const runtime = 'edge';
+export const preferredRegion = ['sin1'];
 export const dynamic = 'force-dynamic';
 
-function parsePositiveNumber(value: string | null, fallback: number) {
-  const parsed = Number(value ?? fallback);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
+function parseSizeParam(value: string | null): number {
+  if (!value) {
+    return DEFAULT_SIZE_BYTES;
   }
-  return parsed;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_SIZE_BYTES;
+  }
+  return Math.min(MAX_SIZE_BYTES, Math.floor(parsed));
 }
 
-export async function GET(req: Request): Promise<Response> {
-  const { searchParams } = new URL(req.url);
-  const seconds = parsePositiveNumber(searchParams.get('seconds'), 10);
-  const chunkSize = Math.max(1024, parsePositiveNumber(searchParams.get('chunk'), 65536));
-  const server = searchParams.get('server') ?? 'auto';
-
-  const startTime = performance.now();
-  const endAt = startTime + seconds * 1000;
-  let closed = false;
-  let timeout: ReturnType<typeof setTimeout> | null = null;
+export function GET(request: Request): Response {
+  const { searchParams } = new URL(request.url);
+  const requestedSize = parseSizeParam(searchParams.get('size'));
+  const server = searchParams.get('server') ?? 'sin';
+  let transmitted = 0;
 
   const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      timeout = setTimeout(() => {
-        if (closed) return;
-        closed = true;
-        controller.close();
-      }, seconds * 1000);
-    },
     pull(controller) {
-      if (closed) {
-        return;
-      }
-
-      if (performance.now() >= endAt) {
-        closed = true;
-        if (timeout) {
-          clearTimeout(timeout);
-          timeout = null;
-        }
+      if (transmitted >= requestedSize) {
         controller.close();
         return;
       }
 
-      const chunk = new Uint8Array(chunkSize);
+      const remaining = requestedSize - transmitted;
+      const chunkLength = Math.min(CHUNK_SIZE_BYTES, remaining);
+      const chunk = new Uint8Array(chunkLength);
       crypto.getRandomValues(chunk);
+      transmitted += chunkLength;
       controller.enqueue(chunk);
-    },
-    cancel() {
-      closed = true;
-      if (timeout) {
-        clearTimeout(timeout);
-        timeout = null;
-      }
     }
   });
 
@@ -59,6 +43,7 @@ export async function GET(req: Request): Promise<Response> {
     headers: {
       'Content-Type': 'application/octet-stream',
       'Cache-Control': 'no-store',
+      'Content-Length': String(requestedSize),
       'X-Speedtest-Server': server
     }
   });

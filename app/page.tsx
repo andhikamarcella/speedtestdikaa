@@ -1,1127 +1,463 @@
 'use client';
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-
-type TestResult = {
-  mbps: number;
-  bytes: number;
-  durationMs: number;
-  timestamp: number;
-};
-
-type ProgressState = {
-  percent: number;
-  instantaneousMbps: number;
-};
-
-type PingStats = {
-  avg: number;
-  min: number;
-  max: number;
-  stdDev: number;
-};
-
-type PingResult = PingStats & {
-  samples: number[];
-  timestamp: number;
-};
-
-type ServerResults = {
-  download?: TestResult;
-  upload?: TestResult;
-  ping?: PingResult;
-  robloxPing?: PingResult;
-};
-
-type StoredState = {
-  version: 2;
-  activeServerId: string;
-  servers: Record<string, ServerResults>;
-};
+import { useCallback, useMemo, useState } from 'react';
 
 type ServerOption = {
   id: string;
   label: string;
-  origin?: string;
 };
 
-type PingProgress = {
-  percent: number;
-  lastRtt: number | null;
+type SpeedSample = {
+  mbps: number;
+  bytes: number;
+  durationMs: number;
 };
 
-const STORAGE_KEY = 'speedtest-vercel-results-v1';
-const SERVER_OPTIONS: ServerOption[] = [
-  { id: 'jakarta', label: 'Jakarta' },
-  { id: 'singapore', label: 'Singapore' },
-  { id: 'tokyo', label: 'Tokyo' },
-  { id: 'virginia', label: 'Virginia' }
+type NumberStats = {
+  average: number;
+  min: number;
+  max: number;
+};
+
+const SERVERS: ServerOption[] = [
+  { id: 'sin', label: 'Singapore' },
+  { id: 'tyo', label: 'Tokyo' },
+  { id: 'iad', label: 'Virginia' }
 ];
-const DEFAULT_SERVER_ID = SERVER_OPTIONS[0].id;
-const DURATION_OPTIONS = [5, 10, 15] as const;
-const DEFAULT_PING_ITERATIONS = 15;
-const STREAM_CHUNK_SIZE = 65536;
-const MAX_UPLOAD_BYTES = 3.5 * 1024 * 1024;
-const ROBLOX_PING_ITERATIONS = 12;
 
-const formatMbps = (value: number) => `${value.toFixed(2)} Mbps`;
-const formatBytes = (value: number) => {
-  if (value === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-  const scaled = value / Math.pow(1024, exponent);
-  return `${scaled.toFixed(exponent === 0 ? 0 : 2)} ${units[exponent]}`;
-};
+const DOWNLOAD_SAMPLE_COUNT = 3;
+const UPLOAD_SAMPLE_COUNT = 3;
+const PING_SAMPLE_COUNT = 15;
+const DOWNLOAD_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB per sample
+const UPLOAD_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB per sample
+const STREAM_CHUNK_SIZE = 64 * 1024;
 
-const formatDuration = (ms: number) => `${(ms / 1000).toFixed(2)} s`;
-const formatRtt = (ms: number) => `${ms.toFixed(2)} ms`;
+function formatMbps(value: number | null): string {
+  if (value == null || Number.isNaN(value)) {
+    return '—';
+  }
+  return `${value.toFixed(2)} Mbps`;
+}
 
-const calculateStats = (values: number[]): PingStats | null => {
-  if (!values.length) return null;
+function formatLatency(value: number | null): string {
+  if (value == null || Number.isNaN(value)) {
+    return '—';
+  }
+  return `${value.toFixed(2)} ms`;
+}
+
+function formatProgress(value: number): string {
+  const safe = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
+  return `${safe.toFixed(0)}%`;
+}
+
+function computeStats(values: number[]): NumberStats | null {
+  if (!values.length) {
+    return null;
+  }
   const min = Math.min(...values);
   const max = Math.max(...values);
   const sum = values.reduce((acc, value) => acc + value, 0);
-  const avg = sum / values.length;
-  const variance =
-    values.reduce((acc, value) => acc + Math.pow(value - avg, 2), 0) / values.length;
   return {
+    average: sum / values.length,
     min,
-    max,
-    avg,
-    stdDev: Math.sqrt(variance)
+    max
   };
-};
+}
 
-const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+export default function HomePage(): JSX.Element {
+  const [selectedServer, setSelectedServer] = useState<string>(SERVERS[0]!.id);
 
-const isAbortError = (error: unknown): boolean => {
-  return error instanceof DOMException && error.name === 'AbortError';
-};
+  const [downloadSamples, setDownloadSamples] = useState<SpeedSample[]>([]);
+  const [uploadSamples, setUploadSamples] = useState<SpeedSample[]>([]);
+  const [pingSamples, setPingSamples] = useState<number[]>([]);
 
-export default function HomePage() {
-  const [duration, setDuration] = useState<(typeof DURATION_OPTIONS)[number]>(DURATION_OPTIONS[1]);
-  const [selectedServerId, setSelectedServerId] = useState<string>(DEFAULT_SERVER_ID);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [pingProgress, setPingProgress] = useState(0);
 
-  const [downloadResult, setDownloadResult] = useState<TestResult | null>(null);
-  const [uploadResult, setUploadResult] = useState<TestResult | null>(null);
-  const [pingResult, setPingResult] = useState<PingResult | null>(null);
-  const [robloxPingResult, setRobloxPingResult] = useState<PingResult | null>(null);
-
-  const [downloadProgress, setDownloadProgress] = useState<ProgressState | null>(null);
-  const [uploadProgress, setUploadProgress] = useState<ProgressState | null>(null);
-  const [pingProgress, setPingProgress] = useState<PingProgress | null>(null);
-  const [robloxPingProgress, setRobloxPingProgress] = useState<PingProgress | null>(null);
+  const [downloadInstant, setDownloadInstant] = useState<number | null>(null);
+  const [uploadInstant, setUploadInstant] = useState<number | null>(null);
+  const [pingInstant, setPingInstant] = useState<number | null>(null);
 
   const [downloadRunning, setDownloadRunning] = useState(false);
   const [uploadRunning, setUploadRunning] = useState(false);
   const [pingRunning, setPingRunning] = useState(false);
-  const [robloxPingRunning, setRobloxPingRunning] = useState(false);
 
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pingError, setPingError] = useState<string | null>(null);
-  const [robloxPingError, setRobloxPingError] = useState<string | null>(null);
 
-  const downloadAbortRef = useRef<AbortController | null>(null);
-  const uploadAbortRef = useRef<AbortController | null>(null);
-  const pingAbortRef = useRef<AbortController | null>(null);
-  const robloxPingAbortRef = useRef<AbortController | null>(null);
-  const storedStateRef = useRef<StoredState>({
-    version: 2,
-    activeServerId: DEFAULT_SERVER_ID,
-    servers: {}
-  });
+  const downloadStats = useMemo(() => computeStats(downloadSamples.map((sample) => sample.mbps)), [
+    downloadSamples
+  ]);
+  const uploadStats = useMemo(() => computeStats(uploadSamples.map((sample) => sample.mbps)), [
+    uploadSamples
+  ]);
+  const pingStats = useMemo(() => computeStats(pingSamples), [pingSamples]);
 
-  const selectedServer = useMemo(() => {
-    return (
-      SERVER_OPTIONS.find((option) => option.id === selectedServerId) ?? SERVER_OPTIONS[0]
-    );
-  }, [selectedServerId]);
+  const latestDownload = downloadSamples.at(-1)?.mbps ?? null;
+  const latestUpload = uploadSamples.at(-1)?.mbps ?? null;
+  const latestPing = pingSamples.at(-1) ?? null;
 
-  const applyServerResults = useCallback((serverId: string) => {
-    const entry = storedStateRef.current.servers[serverId];
-
-    if (entry && typeof entry === 'object') {
-      setDownloadResult(entry.download ?? null);
-      setUploadResult(entry.upload ?? null);
-      setPingResult(entry.ping ?? null);
-      setRobloxPingResult(entry.robloxPing ?? null);
-      return;
-    }
-
-    setDownloadResult(null);
-    setUploadResult(null);
-    setPingResult(null);
-    setRobloxPingResult(null);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (!stored) return;
-
-      const parsed = JSON.parse(stored) as unknown;
-
-      if (
-        parsed &&
-        typeof parsed === 'object' &&
-        'version' in parsed &&
-        (parsed as { version: unknown }).version === 2
-      ) {
-        const state = parsed as StoredState;
-        const normalizedServers =
-          state.servers && typeof state.servers === 'object'
-            ? Object.entries(state.servers).reduce<Record<string, ServerResults>>(
-                (accumulator, [key, value]) => {
-                  if (value && typeof value === 'object') {
-                    const typed = value as ServerResults;
-                    accumulator[key] = {
-                      download: typed.download,
-                      upload: typed.upload,
-                      ping: typed.ping,
-                      robloxPing: typed.robloxPing
-                    };
-                  } else {
-                    accumulator[key] = {};
-                  }
-                  return accumulator;
-                },
-                {}
-              )
-            : {};
-
-        storedStateRef.current = {
-          version: 2,
-          activeServerId:
-            typeof state.activeServerId === 'string' ? state.activeServerId : DEFAULT_SERVER_ID,
-          servers: normalizedServers
-        };
-
-        const requestedId = storedStateRef.current.activeServerId;
-        const validServerId = SERVER_OPTIONS.some((option) => option.id === requestedId)
-          ? requestedId
-          : DEFAULT_SERVER_ID;
-
-        storedStateRef.current.activeServerId = validServerId;
-        setSelectedServerId(validServerId);
-        applyServerResults(validServerId);
-        return;
-      }
-
-      if (parsed && typeof parsed === 'object') {
-        const legacy = parsed as ServerResults;
-        const legacyEntry: ServerResults = {
-          download: legacy.download,
-          upload: legacy.upload,
-          ping: legacy.ping,
-          robloxPing: legacy.robloxPing
-        };
-        storedStateRef.current = {
-          version: 2,
-          activeServerId: DEFAULT_SERVER_ID,
-          servers: {
-            [DEFAULT_SERVER_ID]: legacyEntry
-          }
-        };
-        setSelectedServerId(DEFAULT_SERVER_ID);
-        applyServerResults(DEFAULT_SERVER_ID);
-      }
-    } catch (error) {
-      console.warn('Failed to parse stored results', error);
-    }
-  }, [applyServerResults]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const entry: ServerResults = {
-      download: downloadResult ?? undefined,
-      upload: uploadResult ?? undefined,
-      ping: pingResult ?? undefined,
-      robloxPing: robloxPingResult ?? undefined
-    };
-
-    storedStateRef.current.activeServerId = selectedServerId;
-    storedStateRef.current.servers[selectedServerId] = entry;
-
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(storedStateRef.current));
-  }, [downloadResult, uploadResult, pingResult, robloxPingResult, selectedServerId]);
-
-  const resetAbortControllers = useCallback(() => {
-    downloadAbortRef.current = null;
-    uploadAbortRef.current = null;
-    pingAbortRef.current = null;
-    robloxPingAbortRef.current = null;
-  }, []);
-
-  const stopAll = useCallback(() => {
-    downloadAbortRef.current?.abort();
-    uploadAbortRef.current?.abort();
-    pingAbortRef.current?.abort();
-    robloxPingAbortRef.current?.abort();
-  }, []);
-
-  const handleServerChange = useCallback(
-    (event: ChangeEvent<HTMLSelectElement>) => {
-      const nextServerId = event.target.value as (typeof SERVER_OPTIONS)[number]['id'];
-      if (nextServerId === selectedServerId) {
-        return;
-      }
-
-      stopAll();
-      resetAbortControllers();
-
-      setDownloadProgress(null);
-      setUploadProgress(null);
-      setPingProgress(null);
-      setRobloxPingProgress(null);
-
-      setDownloadError(null);
-      setUploadError(null);
-      setPingError(null);
-      setRobloxPingError(null);
-
-      storedStateRef.current.activeServerId = nextServerId;
-      applyServerResults(nextServerId);
-      setSelectedServerId(nextServerId);
-    },
-    [
-      applyServerResults,
-      resetAbortControllers,
-      selectedServerId,
-      stopAll
-    ]
-  );
-
-  const buildServerUrl = useCallback(
-    (path: string, params: Record<string, string | number> = {}) => {
-      const search = new URLSearchParams();
-      Object.entries(params).forEach(([key, value]) => {
-        search.set(key, String(value));
-      });
-      search.set('server', selectedServer.id);
-      const query = search.toString();
-
-      if (selectedServer.origin) {
-        const url = new URL(path, selectedServer.origin);
-        url.search = query;
-        return url.toString();
-      }
-
-      return `${path}?${query}`;
-    },
-    [selectedServer]
-  );
-
-  const serverList = useMemo(
-    () => SERVER_OPTIONS.map((option) => option.label).join(', '),
-    []
-  );
-
-  useEffect(() => {
-    return () => {
-      stopAll();
-      resetAbortControllers();
-    };
-  }, [resetAbortControllers, stopAll]);
+  const disableServerSelection = downloadRunning || uploadRunning || pingRunning;
 
   const runDownloadTest = useCallback(async () => {
     if (downloadRunning) {
-      downloadAbortRef.current?.abort();
       return;
     }
 
-    setDownloadError(null);
-    setDownloadProgress({ percent: 0, instantaneousMbps: 0 });
     setDownloadRunning(true);
-
-    const controller = new AbortController();
-    downloadAbortRef.current = controller;
+    setDownloadError(null);
+    setDownloadSamples([]);
+    setDownloadProgress(0);
+    setDownloadInstant(null);
 
     try {
-      const startedAt = performance.now();
-      const requestUrl = buildServerUrl('/api/download', {
-        seconds: duration,
-        chunk: STREAM_CHUNK_SIZE
-      });
+      for (let sampleIndex = 0; sampleIndex < DOWNLOAD_SAMPLE_COUNT; sampleIndex += 1) {
+        const response = await fetch(
+          `/api/download?server=${encodeURIComponent(selectedServer)}&size=${DOWNLOAD_SIZE_BYTES}`,
+          {
+            cache: 'no-store'
+          }
+        );
 
-      const response = await fetch(requestUrl, {
-        signal: controller.signal,
-        cache: 'no-store'
-      });
+        if (!response.ok || !response.body) {
+          throw new Error('Download stream is unavailable.');
+        }
 
-      if (!response.ok) {
-        throw new Error(`Server responded with status ${response.status}`);
+        const reader = response.body.getReader();
+        let received = 0;
+        const startedAt = performance.now();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          if (value) {
+            received += value.byteLength;
+            const elapsed = performance.now() - startedAt;
+            if (elapsed > 0) {
+              setDownloadInstant((received * 8) / elapsed / 1000);
+            }
+            const partial = (received / DOWNLOAD_SIZE_BYTES) * (100 / DOWNLOAD_SAMPLE_COUNT);
+            setDownloadProgress(sampleIndex * (100 / DOWNLOAD_SAMPLE_COUNT) + partial);
+          }
+        }
+
+        const finishedAt = performance.now();
+        const durationMs = finishedAt - startedAt;
+        const mbps = durationMs > 0 ? (received * 8) / durationMs / 1000 : 0;
+
+        setDownloadInstant(mbps);
+        setDownloadSamples((prev) => [...prev, { mbps, bytes: received, durationMs }]);
+        setDownloadProgress(((sampleIndex + 1) / DOWNLOAD_SAMPLE_COUNT) * 100);
       }
-
-      if (!response.body) {
-        throw new Error('Streaming not supported in this browser.');
-      }
-
-      const reader = response.body.getReader();
-      let totalBytes = 0;
-      let lastChunkTime = startedAt;
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-
-        totalBytes += value.byteLength;
-        const now = performance.now();
-        const elapsed = now - startedAt;
-        const chunkElapsed = Math.max(now - lastChunkTime, 1);
-        const instantaneousMbps = (value.byteLength * 8) / (chunkElapsed / 1000) / 1e6;
-        lastChunkTime = now;
-
-        setDownloadProgress({
-          percent: Math.min(100, (elapsed / (duration * 1000)) * 100),
-          instantaneousMbps
-        });
-      }
-
-      const finishedAt = performance.now();
-      const durationMs = finishedAt - startedAt;
-      const mbps = totalBytes > 0 && durationMs > 0 ? (totalBytes * 8) / (durationMs / 1000) / 1e6 : 0;
-
-      setDownloadResult({
-        mbps,
-        bytes: totalBytes,
-        durationMs,
-        timestamp: Date.now()
-      });
-
-      setDownloadProgress({ percent: 100, instantaneousMbps: 0 });
     } catch (error) {
-      if (isAbortError(error)) {
-        setDownloadError('Download test aborted.');
-      } else {
-        setDownloadError((error as Error).message ?? 'Download test failed.');
-      }
+      setDownloadError(error instanceof Error ? error.message : 'Download test failed.');
     } finally {
-      downloadAbortRef.current = null;
       setDownloadRunning(false);
-      setDownloadProgress(null);
     }
-  }, [buildServerUrl, downloadRunning, duration]);
+  }, [downloadRunning, selectedServer]);
 
   const runUploadTest = useCallback(async () => {
     if (uploadRunning) {
-      uploadAbortRef.current?.abort();
       return;
     }
 
-    setUploadError(null);
-    setUploadProgress({ percent: 0, instantaneousMbps: 0 });
     setUploadRunning(true);
-
-    const controller = new AbortController();
-    uploadAbortRef.current = controller;
+    setUploadError(null);
+    setUploadSamples([]);
+    setUploadProgress(0);
+    setUploadInstant(null);
 
     try {
-      const startedAt = performance.now();
-      let totalBytes = 0;
-      let lastChunkTime = startedAt;
-      const endAt = startedAt + duration * 1000;
+      for (let sampleIndex = 0; sampleIndex < UPLOAD_SAMPLE_COUNT; sampleIndex += 1) {
+        let sent = 0;
+        const startedAt = performance.now();
 
-      let streamClosed = false;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (sent >= UPLOAD_SIZE_BYTES) {
+              controller.close();
+              return;
+            }
 
-      const stream = new ReadableStream<Uint8Array>({
-        pull(streamController) {
-          if (streamClosed) {
-            return;
+            const chunkLength = Math.min(STREAM_CHUNK_SIZE, UPLOAD_SIZE_BYTES - sent);
+            const chunk = new Uint8Array(chunkLength);
+            crypto.getRandomValues(chunk);
+            sent += chunkLength;
+            controller.enqueue(chunk);
+
+            const elapsed = performance.now() - startedAt;
+            if (elapsed > 0) {
+              setUploadInstant((sent * 8) / elapsed / 1000);
+            }
+
+            const partial = (sent / UPLOAD_SIZE_BYTES) * (100 / UPLOAD_SAMPLE_COUNT);
+            setUploadProgress(sampleIndex * (100 / UPLOAD_SAMPLE_COUNT) + partial);
           }
-
-          if (controller.signal.aborted) {
-            streamClosed = true;
-            streamController.error(new DOMException('Upload aborted', 'AbortError'));
-            return;
-          }
-
-          const now = performance.now();
-          const elapsed = now - startedAt;
-          const remainingBytes = MAX_UPLOAD_BYTES - totalBytes;
-          const timeRatio = Math.min(elapsed / (duration * 1000), 1);
-          const byteRatio = Math.min(totalBytes / MAX_UPLOAD_BYTES, 1);
-
-          if (now >= endAt || remainingBytes <= 0) {
-            streamClosed = true;
-            const finalPercent = Math.min(100, Math.max(timeRatio, byteRatio) * 100);
-            setUploadProgress({ percent: finalPercent, instantaneousMbps: 0 });
-            streamController.close();
-            return;
-          }
-
-          const chunk = new Uint8Array(Math.min(STREAM_CHUNK_SIZE, remainingBytes));
-          crypto.getRandomValues(chunk);
-          totalBytes += chunk.byteLength;
-
-          const chunkElapsed = Math.max(now - lastChunkTime, 1);
-          const instantaneousMbps = (chunk.byteLength * 8) / (chunkElapsed / 1000) / 1e6;
-          lastChunkTime = now;
-
-          const progressPercent = Math.min(
-            100,
-            Math.max(timeRatio, Math.min(totalBytes / MAX_UPLOAD_BYTES, 1)) * 100
-          );
-
-          setUploadProgress({
-            percent: progressPercent,
-            instantaneousMbps
-          });
-
-          streamController.enqueue(chunk);
-        },
-        cancel() {
-          streamClosed = true;
-        }
-      });
-
-      const requestInit: RequestInit & { duplex: 'half' } = {
-        method: 'POST',
-        body: stream,
-        signal: controller.signal,
-        cache: 'no-store',
-        headers: {
-          'Content-Type': 'application/octet-stream'
-        },
-        duplex: 'half'
-      };
-
-      const uploadUrl = buildServerUrl('/api/upload');
-      const response = await fetch(uploadUrl, requestInit);
-
-      if (response.status === 413) {
-        const finishedAt = performance.now();
-        const durationMs = finishedAt - startedAt;
-        const mbps = totalBytes > 0 && durationMs > 0 ? (totalBytes * 8) / (durationMs / 1000) / 1e6 : 0;
-
-        setUploadResult({
-          mbps,
-          bytes: totalBytes,
-          durationMs,
-          timestamp: Date.now()
         });
 
-        setUploadProgress({ percent: 100, instantaneousMbps: 0 });
-        return;
+        const response = await fetch(`/api/upload?server=${encodeURIComponent(selectedServer)}`, {
+          method: 'POST',
+          body: stream,
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/octet-stream'
+          },
+          duplex: 'half'
+        });
+
+        if (!response.ok) {
+          throw new Error('Upload endpoint responded with an error.');
+        }
+
+        const payload = (await response.json().catch(() => null)) as
+          | { bytes?: number }
+          | null;
+        const confirmedBytes = typeof payload?.bytes === 'number' && payload.bytes > 0 ? payload.bytes : sent;
+        const finishedAt = performance.now();
+        const durationMs = finishedAt - startedAt;
+        const mbps = durationMs > 0 ? (confirmedBytes * 8) / durationMs / 1000 : 0;
+
+        setUploadInstant(mbps);
+        setUploadSamples((prev) => [...prev, { mbps, bytes: confirmedBytes, durationMs }]);
+        setUploadProgress(((sampleIndex + 1) / UPLOAD_SAMPLE_COUNT) * 100);
       }
-
-      if (!response.ok) {
-        throw new Error(`Server responded with status ${response.status}`);
-      }
-
-      const payload = (await response.json()) as { bytes?: number };
-      const serverBytes = typeof payload.bytes === 'number' ? payload.bytes : totalBytes;
-      const finishedAt = performance.now();
-      const durationMs = finishedAt - startedAt;
-      const mbps = serverBytes > 0 && durationMs > 0 ? (serverBytes * 8) / (durationMs / 1000) / 1e6 : 0;
-
-      setUploadResult({
-        mbps,
-        bytes: serverBytes,
-        durationMs,
-        timestamp: Date.now()
-      });
-
-      setUploadProgress({ percent: 100, instantaneousMbps: 0 });
     } catch (error) {
-      if (isAbortError(error)) {
-        setUploadError('Upload test aborted.');
-      } else {
-        setUploadError((error as Error).message ?? 'Upload test failed.');
-      }
+      setUploadError(error instanceof Error ? error.message : 'Upload test failed.');
     } finally {
-      uploadAbortRef.current = null;
       setUploadRunning(false);
-      setUploadProgress(null);
     }
-  }, [buildServerUrl, duration, uploadRunning]);
+  }, [selectedServer, uploadRunning]);
 
   const runPingTest = useCallback(async () => {
     if (pingRunning) {
-      pingAbortRef.current?.abort();
       return;
     }
 
-    setPingError(null);
-    setPingProgress({ percent: 0, lastRtt: null });
     setPingRunning(true);
-
-    const controller = new AbortController();
-    pingAbortRef.current = controller;
+    setPingError(null);
+    setPingSamples([]);
+    setPingProgress(0);
+    setPingInstant(null);
 
     try {
-      const samples: number[] = [];
-
-      for (let index = 0; index < DEFAULT_PING_ITERATIONS; index += 1) {
-        if (controller.signal.aborted) {
-          throw new DOMException('Ping aborted', 'AbortError');
-        }
-
+      for (let sampleIndex = 0; sampleIndex < PING_SAMPLE_COUNT; sampleIndex += 1) {
         const startedAt = performance.now();
-        const response = await fetch(buildServerUrl('/api/ping'), {
-          method: 'GET',
-          cache: 'no-store',
-          signal: controller.signal
+        const response = await fetch(`/api/ping?server=${encodeURIComponent(selectedServer)}`, {
+          cache: 'no-store'
         });
 
-        if (!response.ok && response.status !== 204) {
-          throw new Error(`Ping failed with status ${response.status}`);
+        if (!response.ok) {
+          throw new Error('Ping endpoint responded with an error.');
         }
+
+        await response.json().catch(() => null);
 
         const finishedAt = performance.now();
-        const rtt = finishedAt - startedAt;
-        samples.push(rtt);
+        const durationMs = finishedAt - startedAt;
 
-        setPingProgress({
-          percent: ((index + 1) / DEFAULT_PING_ITERATIONS) * 100,
-          lastRtt: rtt
-        });
+        setPingInstant(durationMs);
+        setPingSamples((prev) => [...prev, durationMs]);
+        setPingProgress(((sampleIndex + 1) / PING_SAMPLE_COUNT) * 100);
 
-        await delay(150);
+        if (sampleIndex < PING_SAMPLE_COUNT - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
       }
-
-      const stats = calculateStats(samples);
-      if (stats) {
-        setPingResult({
-          ...stats,
-          samples,
-          timestamp: Date.now()
-        });
-      }
-      setPingProgress({ percent: 100, lastRtt: samples.at(-1) ?? null });
     } catch (error) {
-      if (isAbortError(error)) {
-        setPingError('Ping test aborted.');
-      } else {
-        setPingError((error as Error).message ?? 'Ping test failed.');
-      }
+      setPingError(error instanceof Error ? error.message : 'Ping test failed.');
     } finally {
-      pingAbortRef.current = null;
       setPingRunning(false);
     }
-  }, [buildServerUrl, pingRunning]);
-
-  const runRobloxPingTest = useCallback(async () => {
-    if (robloxPingRunning) {
-      robloxPingAbortRef.current?.abort();
-      return;
-    }
-
-    setRobloxPingError(null);
-    setRobloxPingProgress({ percent: 0, lastRtt: null });
-    setRobloxPingRunning(true);
-
-    const controller = new AbortController();
-    robloxPingAbortRef.current = controller;
-
-    try {
-      const samples: number[] = [];
-
-      for (let index = 0; index < ROBLOX_PING_ITERATIONS; index += 1) {
-        if (controller.signal.aborted) {
-          throw new DOMException('Ping aborted', 'AbortError');
-        }
-
-        const startedAt = performance.now();
-        const cacheBust = `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`;
-        const targetUrl = `https://www.roblox.com/favicon.ico?cacheBust=${cacheBust}`;
-
-        await fetch(targetUrl, {
-          method: 'GET',
-          mode: 'no-cors',
-          signal: controller.signal
-        });
-
-        const finishedAt = performance.now();
-        const rtt = finishedAt - startedAt;
-        samples.push(rtt);
-
-        setRobloxPingProgress({
-          percent: ((index + 1) / ROBLOX_PING_ITERATIONS) * 100,
-          lastRtt: rtt
-        });
-
-        await delay(200);
-      }
-
-      const stats = calculateStats(samples);
-      if (stats) {
-        setRobloxPingResult({
-          ...stats,
-          samples,
-          timestamp: Date.now()
-        });
-      }
-
-      setRobloxPingProgress({ percent: 100, lastRtt: samples.at(-1) ?? null });
-    } catch (error) {
-      if (isAbortError(error)) {
-        setRobloxPingError('Roblox ping test aborted.');
-      } else {
-        setRobloxPingError((error as Error).message ?? 'Roblox ping test failed.');
-      }
-    } finally {
-      robloxPingAbortRef.current = null;
-      setRobloxPingRunning(false);
-    }
-  }, [robloxPingRunning]);
-
-  const latestResultsSummary = useMemo(() => {
-    return [
-      downloadResult && {
-        label: 'Download',
-        formatted: formatMbps(downloadResult.mbps)
-      },
-      uploadResult && {
-        label: 'Upload',
-        formatted: formatMbps(uploadResult.mbps)
-      },
-      pingResult && {
-        label: 'Ping (avg)',
-        formatted: formatRtt(pingResult.avg)
-      },
-      robloxPingResult && {
-        label: 'Roblox Ping (avg)',
-        formatted: formatRtt(robloxPingResult.avg)
-      }
-    ].filter(Boolean) as { label: string; formatted: string }[];
-  }, [downloadResult, pingResult, robloxPingResult, uploadResult]);
-
-  const heroStats = useMemo(
-    () => [
-      {
-        key: 'server',
-        label: 'Active Server',
-        value: selectedServer.label,
-        caption: selectedServer.origin ? new URL(selectedServer.origin).host : 'Applies to all tests',
-        tone: 'purple'
-      },
-      {
-        key: 'download',
-        label: 'Download',
-        value: downloadResult ? formatMbps(downloadResult.mbps) : '—',
-        caption: downloadResult
-          ? `${formatBytes(downloadResult.bytes)} • ${formatDuration(downloadResult.durationMs)} • ${selectedServer.label}`
-          : `Active server: ${selectedServer.label}`,
-        tone: 'blue'
-      },
-      {
-        key: 'upload',
-        label: 'Upload',
-        value: uploadResult ? formatMbps(uploadResult.mbps) : '—',
-        caption: uploadResult
-          ? `${formatBytes(uploadResult.bytes)} • ${formatDuration(uploadResult.durationMs)} • ${selectedServer.label}`
-          : `Send data to ${selectedServer.label} to begin`,
-        tone: 'purple'
-      },
-      {
-        key: 'ping',
-        label: 'HTTP Ping',
-        value: pingResult ? formatRtt(pingResult.avg) : '—',
-        caption: pingResult
-          ? `Min ${formatRtt(pingResult.min)} • Max ${formatRtt(pingResult.max)}`
-          : `${DEFAULT_PING_ITERATIONS} sample average`,
-        tone: 'green'
-      },
-      {
-        key: 'roblox-ping',
-        label: 'Roblox Ping',
-        value: robloxPingResult ? formatRtt(robloxPingResult.avg) : '—',
-        caption: robloxPingResult
-          ? `Min ${formatRtt(robloxPingResult.min)} • Max ${formatRtt(robloxPingResult.max)}`
-          : `${ROBLOX_PING_ITERATIONS} sample average`,
-        tone: 'amber'
-      }
-    ], [downloadResult, pingResult, robloxPingResult, selectedServer, uploadResult]
-  );
-
-  const statusTags = [
-    {
-      key: 'server',
-      label: 'Server',
-      status: selectedServer.label,
-      tone: 'ready'
-    },
-    {
-      key: 'download',
-      label: 'Download',
-      status: downloadRunning ? 'Running' : 'Idle',
-      tone: downloadRunning ? 'active' : downloadResult ? 'ready' : 'muted'
-    },
-    {
-      key: 'upload',
-      label: 'Upload',
-      status: uploadRunning ? 'Running' : 'Idle',
-      tone: uploadRunning ? 'active' : uploadResult ? 'ready' : 'muted'
-    },
-    {
-      key: 'ping',
-      label: 'HTTP Ping',
-      status: pingRunning ? 'Running' : 'Idle',
-      tone: pingRunning ? 'active' : pingResult ? 'ready' : 'muted'
-    },
-    {
-      key: 'roblox-ping',
-      label: 'Roblox Ping',
-      status: robloxPingRunning ? 'Running' : 'Idle',
-      tone: robloxPingRunning ? 'active' : robloxPingResult ? 'ready' : 'muted'
-    }
-  ];
-
-  const anyRunning = downloadRunning || uploadRunning || pingRunning || robloxPingRunning;
+  }, [pingRunning, selectedServer]);
 
   return (
     <main className="page">
-      <div className="page__glow" aria-hidden="true" />
-      <div className="page__container">
-        <header className="hero" role="banner">
-          <div className="hero__content">
-            <span className="hero__badge">Vercel Ready</span>
-            <h1>Internet Speed Intelligence Dashboard</h1>
-            <p>
-              Stream-aligned diagnostics for download, upload, and HTTP latency — engineered for
-              Vercel&apos;s serverless platform. Every reading relies on <code>performance.now()</code>
-              and cache-safe API routes for accuracy. Choose between {serverList} to profile each
-              region instantly.
+      <div className="page__inner">
+        <header className="page__header">
+          <div className="page__heading">
+            <p className="page__eyebrow">Vercel Edge</p>
+            <h1 className="page__title">Internet Speed Test</h1>
+            <p className="page__subtitle">
+              Measure download, upload, and latency with serverless functions running in the Singapore
+              edge region.
             </p>
-
-            <div className="hero__controls" role="group" aria-label="Global test controls">
-              <label className="field">
-                <span>Test server</span>
-                <select
-                  className="select"
-                  aria-label="Select test server"
-                  value={selectedServerId}
-                  onChange={handleServerChange}
-                >
-                  {SERVER_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Test duration</span>
-                <select
-                  className="select"
-                  aria-label="Select test duration"
-                  value={duration}
-                  onChange={(event) => setDuration(Number(event.target.value) as typeof duration)}
-                >
-                  {DURATION_OPTIONS.map((option) => (
-                    <option key={option} value={option}>{`${option} seconds`}</option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className="btn btn--ghost"
-                type="button"
-                onClick={stopAll}
-                disabled={!anyRunning}
-              >
-                Stop All Tests
-              </button>
-            </div>
-
-            <div className="hero__statuses" role="list" aria-label="Test status indicators">
-              {statusTags.map((tag) => (
-                <span key={tag.key} className={`status status--${tag.tone}`} role="listitem">
-                  <span className="status__dot" aria-hidden="true" />
-                  {tag.label}: {tag.status}
-                </span>
-              ))}
-            </div>
           </div>
-
-          <div className="hero__stats" role="list" aria-label="Latest measurement highlights">
-            {heroStats.map((stat) => (
-              <div key={stat.key} className={`stat-card stat-card--${stat.tone}`} role="listitem">
-                <span className="stat-card__label">{stat.label}</span>
-                <span className="stat-card__value">{stat.value}</span>
-                <span className="stat-card__caption">{stat.caption}</span>
-              </div>
-            ))}
+          <div className="server-select">
+            <label>
+              <span>Select Server</span>
+              <select
+                className="server-select__input"
+                value={selectedServer}
+                onChange={(event) => setSelectedServer(event.target.value)}
+                disabled={disableServerSelection}
+              >
+                {SERVERS.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         </header>
 
-        <div className="dashboard">
-          <div className="dashboard__grid" role="list">
-            <section
-              className="panel panel--download"
-              role="listitem"
-              aria-labelledby="download-heading"
-            >
-              <div className="panel__header">
-                <div>
-                  <h2 id="download-heading">Download Speed</h2>
-                  <p className="panel__description">
-                    Streams random bytes from the {selectedServer.label} server for the selected
-                    duration and reports the sustained throughput.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={runDownloadTest}
-                  aria-label={downloadRunning ? 'Stop download test' : 'Start download test'}
-                  disabled={uploadRunning}
-                >
-                  {downloadRunning ? 'Stop Download' : 'Start Download'}
-                </button>
+        <section className="cards" aria-label="Speed test results">
+          <article className="card">
+            <div className="card__header">
+              <div>
+                <h2 className="card__title">Download</h2>
+                <p className="card__description">Stream random data from the selected edge server.</p>
               </div>
+              <button
+                type="button"
+                className="card__button"
+                onClick={runDownloadTest}
+                disabled={downloadRunning}
+              >
+                {downloadRunning ? 'Running…' : 'Start'}
+              </button>
+            </div>
 
-              {downloadProgress && (
-                <div className="progress" aria-live="polite">
-                  <div className="progress__bar" aria-hidden="true">
-                    <span style={{ width: `${downloadProgress.percent.toFixed(1)}%` }} />
-                  </div>
-                  <div className="progress__meta">
-                    <span>Progress: {downloadProgress.percent.toFixed(1)}%</span>
-                    <span>Instant: {formatMbps(downloadProgress.instantaneousMbps)}</span>
-                  </div>
-                </div>
-              )}
+            <div className="metric">
+              <span className="metric__label">Current</span>
+              <span className="metric__value">{formatMbps(downloadInstant ?? latestDownload)}</span>
+            </div>
 
-              {downloadResult && (
-                <div className="result" aria-label="Download result summary">
-                  <div className="result__value">{formatMbps(downloadResult.mbps)}</div>
-                  <div className="result__meta">
-                    <span>{formatBytes(downloadResult.bytes)}</span>
-                    <span>{formatDuration(downloadResult.durationMs)}</span>
-                  </div>
-                </div>
-              )}
+            <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(downloadProgress)}>
+              <div className="progress__bar" style={{ width: `${Math.min(100, downloadProgress)}%` }} />
+            </div>
+            <p className="progress__label">{formatProgress(downloadProgress)}</p>
 
-              {downloadError && <small className="error">{downloadError}</small>}
-            </section>
-
-            <section
-              className="panel panel--upload"
-              role="listitem"
-              aria-labelledby="upload-heading"
-            >
-              <div className="panel__header">
-                <div>
-                  <h2 id="upload-heading">Upload Speed</h2>
-                  <p className="panel__description">
-                    Generates random data in the browser and streams it to the {selectedServer.label}
-                    API until time runs out, mirroring real throughput conditions.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={runUploadTest}
-                  aria-label={uploadRunning ? 'Stop upload test' : 'Start upload test'}
-                  disabled={downloadRunning}
-                >
-                  {uploadRunning ? 'Stop Upload' : 'Start Upload'}
-                </button>
+            <div className="stats">
+              <div className="stats__item">
+                <span className="stats__label">Average</span>
+                <span className="stats__value">{formatMbps(downloadStats?.average ?? null)}</span>
               </div>
-
-              {uploadProgress && (
-                <div className="progress" aria-live="polite">
-                  <div className="progress__bar" aria-hidden="true">
-                    <span style={{ width: `${uploadProgress.percent.toFixed(1)}%` }} />
-                  </div>
-                  <div className="progress__meta">
-                    <span>Progress: {uploadProgress.percent.toFixed(1)}%</span>
-                    <span>Instant: {formatMbps(uploadProgress.instantaneousMbps)}</span>
-                  </div>
-                </div>
-              )}
-
-              {uploadResult && (
-                <div className="result" aria-label="Upload result summary">
-                  <div className="result__value">{formatMbps(uploadResult.mbps)}</div>
-                  <div className="result__meta">
-                    <span>{formatBytes(uploadResult.bytes)}</span>
-                    <span>{formatDuration(uploadResult.durationMs)}</span>
-                  </div>
-                </div>
-              )}
-
-              {uploadError && <small className="error">{uploadError}</small>}
-            </section>
-
-            <section
-              className="panel panel--ping panel--wide"
-              role="listitem"
-              aria-labelledby="ping-heading"
-            >
-              <div className="panel__header">
-                <div>
-                  <h2 id="ping-heading">HTTP Ping</h2>
-                  <p className="panel__description">
-                    Calls the lightweight <code>/api/ping</code> endpoint on the
-                    {' '}
-                    {selectedServer.label} region {DEFAULT_PING_ITERATIONS} times and records
-                    round-trip timings.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={runPingTest}
-                  aria-label={pingRunning ? 'Stop ping test' : 'Start ping test'}
-                >
-                  {pingRunning ? 'Stop Ping' : 'Start Ping'}
-                </button>
+              <div className="stats__item">
+                <span className="stats__label">Min</span>
+                <span className="stats__value">{formatMbps(downloadStats?.min ?? null)}</span>
               </div>
-
-              {pingProgress && (
-                <div className="progress" aria-live="polite">
-                  <div className="progress__bar" aria-hidden="true">
-                    <span style={{ width: `${pingProgress.percent.toFixed(1)}%` }} />
-                  </div>
-                  <div className="progress__meta">
-                    <span>Progress: {pingProgress.percent.toFixed(1)}%</span>
-                    {typeof pingProgress.lastRtt === 'number' && (
-                      <span>Last RTT: {formatRtt(pingProgress.lastRtt)}</span>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {pingResult && (
-                <div className="ping-results">
-                  <div className="result" aria-label="Ping result summary">
-                    <div className="result__value">{formatRtt(pingResult.avg)}</div>
-                    <div className="result__meta">
-                      <span>Min: {formatRtt(pingResult.min)}</span>
-                      <span>Max: {formatRtt(pingResult.max)}</span>
-                      <span>Std Dev: {formatRtt(pingResult.stdDev)}</span>
-                    </div>
-                  </div>
-                  <div className="table-wrapper" role="region" aria-label="Ping samples">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th scope="col">Sample</th>
-                          <th scope="col">RTT</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pingResult.samples.map((sample, index) => (
-                          <tr key={`ping-${index}`}>
-                            <td>{index + 1}</td>
-                            <td>{formatRtt(sample)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {pingError && <small className="error">{pingError}</small>}
-            </section>
-
-            <section
-              className="panel panel--roblox panel--wide"
-              role="listitem"
-              aria-labelledby="roblox-ping-heading"
-            >
-              <div className="panel__header">
-                <div>
-                  <h2 id="roblox-ping-heading">Roblox Ping</h2>
-                  <p className="panel__description">
-                    Fetches Roblox&apos;s public favicon with cache-busting queries to approximate
-                    end-user latency to their edge network.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={runRobloxPingTest}
-                  aria-label={robloxPingRunning ? 'Stop Roblox ping test' : 'Start Roblox ping test'}
-                >
-                  {robloxPingRunning ? 'Stop Roblox Ping' : 'Start Roblox Ping'}
-                </button>
+              <div className="stats__item">
+                <span className="stats__label">Max</span>
+                <span className="stats__value">{formatMbps(downloadStats?.max ?? null)}</span>
               </div>
+            </div>
 
-              {robloxPingProgress && (
-                <div className="progress" aria-live="polite">
-                  <div className="progress__bar" aria-hidden="true">
-                    <span style={{ width: `${robloxPingProgress.percent.toFixed(1)}%` }} />
-                  </div>
-                  <div className="progress__meta">
-                    <span>Progress: {robloxPingProgress.percent.toFixed(1)}%</span>
-                    {typeof robloxPingProgress.lastRtt === 'number' && (
-                      <span>Last RTT: {formatRtt(robloxPingProgress.lastRtt)}</span>
-                    )}
-                  </div>
-                </div>
-              )}
+            {downloadError ? (
+              <p className="status status--error">{downloadError}</p>
+            ) : downloadSamples.length > 0 ? (
+              <p className="status status--success">Completed {downloadSamples.length} samples.</p>
+            ) : (
+              <p className="status status--muted">No samples yet.</p>
+            )}
+          </article>
 
-              {robloxPingResult && (
-                <div className="ping-results">
-                  <div className="result" aria-label="Roblox ping result summary">
-                    <div className="result__value">{formatRtt(robloxPingResult.avg)}</div>
-                    <div className="result__meta">
-                      <span>Min: {formatRtt(robloxPingResult.min)}</span>
-                      <span>Max: {formatRtt(robloxPingResult.max)}</span>
-                      <span>Std Dev: {formatRtt(robloxPingResult.stdDev)}</span>
-                    </div>
-                  </div>
-                  <div className="table-wrapper" role="region" aria-label="Roblox ping samples">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th scope="col">Sample</th>
-                          <th scope="col">RTT</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {robloxPingResult.samples.map((sample, index) => (
-                          <tr key={`roblox-ping-${index}`}>
-                            <td>{index + 1}</td>
-                            <td>{formatRtt(sample)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {robloxPingError && <small className="error">{robloxPingError}</small>}
-            </section>
-          </div>
-
-          {latestResultsSummary.length > 0 && (
-            <section className="panel panel--summary" aria-live="polite">
-              <div className="panel__header">
-                <div>
-                  <h2>Latest Measurements</h2>
-                  <p className="panel__description">
-                    Stored locally so you can compare with your next run.
-                  </p>
-                </div>
+          <article className="card">
+            <div className="card__header">
+              <div>
+                <h2 className="card__title">Upload</h2>
+                <p className="card__description">Push generated payloads to the edge upload endpoint.</p>
               </div>
-              <ul className="summary-list">
-                {latestResultsSummary.map((entry) => (
-                  <li key={entry.label}>
-                    <span>{entry.label}</span>
-                    <strong>{entry.formatted}</strong>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-        </div>
+              <button
+                type="button"
+                className="card__button"
+                onClick={runUploadTest}
+                disabled={uploadRunning}
+              >
+                {uploadRunning ? 'Running…' : 'Start'}
+              </button>
+            </div>
 
-        <footer className="page__footer">
-          <p>
-            These metrics capture HTTP-based throughput and latency — expect variance versus ICMP
-            utilities. Deploy instantly on Vercel without maintaining a custom server.
-          </p>
-        </footer>
+            <div className="metric">
+              <span className="metric__label">Current</span>
+              <span className="metric__value">{formatMbps(uploadInstant ?? latestUpload)}</span>
+            </div>
+
+            <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(uploadProgress)}>
+              <div className="progress__bar" style={{ width: `${Math.min(100, uploadProgress)}%` }} />
+            </div>
+            <p className="progress__label">{formatProgress(uploadProgress)}</p>
+
+            <div className="stats">
+              <div className="stats__item">
+                <span className="stats__label">Average</span>
+                <span className="stats__value">{formatMbps(uploadStats?.average ?? null)}</span>
+              </div>
+              <div className="stats__item">
+                <span className="stats__label">Min</span>
+                <span className="stats__value">{formatMbps(uploadStats?.min ?? null)}</span>
+              </div>
+              <div className="stats__item">
+                <span className="stats__label">Max</span>
+                <span className="stats__value">{formatMbps(uploadStats?.max ?? null)}</span>
+              </div>
+            </div>
+
+            {uploadError ? (
+              <p className="status status--error">{uploadError}</p>
+            ) : uploadSamples.length > 0 ? (
+              <p className="status status--success">Completed {uploadSamples.length} samples.</p>
+            ) : (
+              <p className="status status--muted">No samples yet.</p>
+            )}
+          </article>
+
+          <article className="card">
+            <div className="card__header">
+              <div>
+                <h2 className="card__title">Ping</h2>
+                <p className="card__description">Check HTTP round-trip latency from this browser.</p>
+              </div>
+              <button
+                type="button"
+                className="card__button"
+                onClick={runPingTest}
+                disabled={pingRunning}
+              >
+                {pingRunning ? 'Running…' : 'Start'}
+              </button>
+            </div>
+
+            <div className="metric">
+              <span className="metric__label">Current</span>
+              <span className="metric__value">{formatLatency(pingInstant ?? latestPing)}</span>
+            </div>
+
+            <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pingProgress)}>
+              <div className="progress__bar" style={{ width: `${Math.min(100, pingProgress)}%` }} />
+            </div>
+            <p className="progress__label">{formatProgress(pingProgress)}</p>
+
+            <div className="stats">
+              <div className="stats__item">
+                <span className="stats__label">Average</span>
+                <span className="stats__value">{formatLatency(pingStats?.average ?? null)}</span>
+              </div>
+              <div className="stats__item">
+                <span className="stats__label">Min</span>
+                <span className="stats__value">{formatLatency(pingStats?.min ?? null)}</span>
+              </div>
+              <div className="stats__item">
+                <span className="stats__label">Max</span>
+                <span className="stats__value">{formatLatency(pingStats?.max ?? null)}</span>
+              </div>
+            </div>
+
+            {pingError ? (
+              <p className="status status--error">{pingError}</p>
+            ) : pingSamples.length > 0 ? (
+              <p className="status status--success">Completed {pingSamples.length} samples.</p>
+            ) : (
+              <p className="status status--muted">No samples yet.</p>
+            )}
+          </article>
+        </section>
       </div>
     </main>
   );
