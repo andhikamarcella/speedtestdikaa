@@ -207,8 +207,7 @@ export default function HomePage(): JSX.Element {
           cache: 'no-store',
           headers: {
             'Content-Type': 'application/octet-stream'
-          },
-          duplex: 'half'
+          }
         });
 
         if (!response.ok) {
