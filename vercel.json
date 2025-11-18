@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "dest": "/api/$1"
+    }
+  ],
+  "outputDirectory": ".next"
+}
